@@ -35,7 +35,7 @@ npm start          # run the app
 npm run dist       # build the Windows installer into release/
 ```
 
-A release is published by pushing a version tag (`git tag v1.2.1 && git push origin v1.2.1`) after bumping `version` in `package.json`; GitHub Actions builds the installer and attaches it to the release.
+To publish a release, bump `version` in `package.json` and push to `main`. GitHub Actions builds the installer and publishes release `v<version>`.
 
 ## Licences
 

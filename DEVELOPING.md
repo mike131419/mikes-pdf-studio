@@ -11,8 +11,8 @@
 
 ## Release
 1. Bump `version` in `package.json`.
-2. Commit, then `git tag vX.Y.Z && git push origin main vX.Y.Z`.
-3. The *Build Windows installer* workflow builds `MikesPDFStudio-Setup-X.Y.Z.exe` + `latest.yml` and publishes the GitHub Release.
+2. Commit and push to `main`.
+3. The *Build Windows installer* workflow sees the new version and builds `MikesPDFStudio-Setup-X.Y.Z.exe` + `latest.yml` and publishes the GitHub Release.
    Installed copies pick the update up automatically (electron-updater, GitHub provider).
 
 ## Notes

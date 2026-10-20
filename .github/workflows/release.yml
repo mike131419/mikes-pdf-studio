@@ -1,14 +1,20 @@
 # Builds the Windows installer (Setup.exe) and publishes it as a GitHub Release.
-# Triggered by pushing a version tag, e.g.  git tag v1.2.0 && git push origin v1.2.0
+# Runs on every push to main: if package.json has a version that has no release yet,
+# it builds MikesPDFStudio-Setup-<version>.exe and publishes release v<version>
+# (installed apps then update themselves). Otherwise it only builds, for checking.
 name: Build Windows installer
 
 on:
   push:
-    tags: ['v*']
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
   windows:
@@ -20,12 +26,21 @@ jobs:
         with:
           node-version: 20
 
-      - name: Check the tag matches package.json
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Is this a new version?
+        id: ver
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           v=$(node -p "require('./package.json').version")
-          [ "v$v" = "${GITHUB_REF_NAME}" ] || { echo "Tag ${GITHUB_REF_NAME} does not match package.json version $v"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          if gh release view "v$v" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release v$v already exists - build only."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "New version v$v - will publish."
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Install
         run: npm install --no-audit --no-fund
@@ -34,18 +49,18 @@ jobs:
         run: npm run build:html
 
       - name: Build installer and publish release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: steps.ver.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npx electron-builder --win --x64 --publish always
 
-      - name: Build installer only (manual run)
-        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+      - name: Build installer only
+        if: steps.ver.outputs.publish != 'true'
         run: npx electron-builder --win --x64 --publish never
 
       - uses: actions/upload-artifact@v4
         with:
-          name: installer
+          name: installer-${{ steps.ver.outputs.version }}
           path: |
             release/*.exe
             release/latest.yml
