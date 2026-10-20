@@ -54,7 +54,7 @@ window.PDFStudioFonts = (() => {
   async function tryDownload(family, bold, italic) {
     if (!host || !host.download) return null;
     const k = `${famKey(family)}|${!!bold}|${!!italic}`;
-    if (!dlTried.has(k)) dlTried.set(k, host.download(family, !!bold, !!italic).then(e => { if (e) refreshList(); return e || null; }).catch(() => null));
+    if (!dlTried.has(k)) dlTried.set(k, host.download(family, !!bold, !!italic).then(e => { console.log('[diag] font download', family, bold, italic, e ? 'ok ' + e.file : 'not available'); if (e) refreshList(); return e || null; }).catch(err => { console.warn('font download failed', family, err && err.message); return null; }));
     const e = await dlTried.get(k);
     return e ? (await faceOf(family, bold, italic)) || e : null;
   }

@@ -52,6 +52,16 @@ function createWindow() {
   });
   Menu.setApplicationMenu(null);
   win.loadFile(path.join(__dirname, 'index.html'));
+  // Diagnostics: the editor's messages go to %APPDATA%\Mike's PDF Studio\logs\app.log (kept small)
+  const logFile = path.join(app.getPath('userData'), 'logs', 'app.log');
+  try { fs.mkdirSync(path.dirname(logFile), { recursive: true }); if (fs.existsSync(logFile) && fs.statSync(logFile).size > 2e6) fs.renameSync(logFile, logFile + '.old'); } catch {}
+  const log = line => { try { fs.appendFileSync(logFile, `${new Date().toISOString()} ${line}\n`); } catch {} };
+  log(`--- start v${app.getVersion()} ${process.platform} ${process.arch}`);
+  win.webContents.on('console-message', (e, level, message, line, source) => {
+    if (level >= 2 || /^\[diag\]/.test(message)) log(`[${['debug', 'info', 'warn', 'error'][level] || level}] ${String(message).slice(0, 2000)}${level >= 3 ? ` (${path.basename(String(source || ''))}:${line})` : ''}`);
+  });
+  win.webContents.on('render-process-gone', (e, d) => log(`renderer gone: ${d.reason}`));
+  win.webContents.on('before-input-event', (e, input) => { if (input.type === 'keyDown' && input.control && input.shift && input.key.toLowerCase() === 'i') win.webContents.toggleDevTools(); });
   win.once('ready-to-show', () => { win.maximize(); win.show(); });
   win.webContents.setWindowOpenHandler(({ url }) => { if (/^https?:/.test(url)) shell.openExternal(url); return { action: 'deny' }; });
   win.webContents.on('will-navigate', e => e.preventDefault());

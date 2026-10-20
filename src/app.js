@@ -2,6 +2,9 @@
 'use strict';
 (() => {
 const $ = (s, el = document) => el.querySelector(s);
+window.addEventListener('error', e => console.error('[uncaught]', e.message, e.filename ? `${e.filename.split('/').pop()}:${e.lineno}` : ''));
+window.addEventListener('unhandledrejection', e => console.error('[unhandled promise]', e.reason && (e.reason.stack || e.reason.message || e.reason)));
+const diag = (...a) => console.log('[diag]', ...a);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const PDFLib = window.PDFLib;
 let pdfjsLib = null;
@@ -652,6 +655,9 @@ function startEditing(key, id, selectAll, opts = {}) {
   if (!r) { r = document.createRange(); r.selectNodeContents(body); if (!selectAll) r.collapse(false); }
   sel.addRange(r);
   status('Typing… click outside the box or press Esc when done.');
+  const desc = el2 => el2 ? `${el2.tagName}.${el2.className || ''}#${el2.id || ''}` : 'none';
+  diag('edit start', key, id, 'active=' + desc(document.activeElement), 'editable=' + body.contentEditable, 'focused=' + (document.activeElement === body));
+  if (document.activeElement !== body) { body.focus(); diag('refocus ->', desc(document.activeElement)); }
 }
 function commitEditing() {
   if (!editing) return;
@@ -677,6 +683,18 @@ function commitEditing() {
   relayout(a);
   renderAnnots(p); selectAnnot(key, id);
 }
+
+// Safety net: while a text box is being edited, keystrokes must reach it. If focus ends up on the page
+// itself (not on a toolbar control the user picked), put it back in the box.
+document.addEventListener('keydown', e => {
+  if (!editing) return;
+  const body = editing.el.querySelector('.tbody');
+  const ae = document.activeElement;
+  if (ae === body || (ae && ae.closest && ae.closest('#toolbar,.modal'))) return;
+  if (e.key === 'Escape' || e.ctrlKey || e.altKey || e.metaKey) return;
+  diag('key while editing went to', ae ? ae.tagName + '.' + (ae.className || '') : 'none', 'editable=' + body.contentEditable, 'connected=' + body.isConnected);
+  if (body.isConnected) { body.focus(); const r = document.createRange(); r.selectNodeContents(body); r.collapse(false); const s2 = getSelection(); s2.removeAllRanges(); s2.addRange(r); }
+}, true);
 
 /* pointer interaction on pages */
 let drag = null;
@@ -1171,7 +1189,9 @@ function applyRealFont(p, a, rec, newSize) {
 }
 async function findOriginalFont(p, a, pdfName) {
   try {
+    diag('font lookup', pdfName, a.bold ? 'bold' : '', a.italic ? 'italic' : '');
     const r = await PSF.resolvePdfFont(pdfName, a.bold, a.italic, msg => status(msg));
+    diag('font lookup result', pdfName, r ? `${r.how} ${r.rec.family} ${r.rec.style}` : 'none');
     status('Ready');
     const shown = pdfName.replace(/[,\-].*$/, '').replace(/(PS)?MT$/, '');
     if (!r) {
