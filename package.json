@@ -1,0 +1,59 @@
+{
+  "name": "mikes-pdf-studio",
+  "productName": "Mike's PDF Studio",
+  "version": "1.2.0",
+  "description": "Offline PDF editor for Windows: view, edit text and pictures, OCR, sign, stamp, merge and organise pages.",
+  "author": "Mike",
+  "license": "SEE LICENSE IN LICENSE",
+  "private": true,
+  "main": "desktop/main.js",
+  "repository": { "type": "git", "url": "https://github.com/mike131419/mikes-pdf-studio.git" },
+  "scripts": {
+    "build:html": "node build.mjs",
+    "start": "node build.mjs && electron .",
+    "dist": "node build.mjs && electron-builder --win --x64 --publish never",
+    "release": "node build.mjs && electron-builder --win --x64 --publish always"
+  },
+  "dependencies": {
+    "electron-updater": "6.3.9"
+  },
+  "devDependencies": {
+    "electron": "33.4.11",
+    "electron-builder": "25.1.8"
+  },
+  "build": {
+    "appId": "com.mike.pdfstudio",
+    "productName": "Mike's PDF Studio",
+    "copyright": "Mike",
+    "directories": { "output": "release", "buildResources": "build" },
+    "files": [
+      "desktop/main.js",
+      "desktop/preload.js",
+      "desktop/index.html",
+      "desktop/icon.png",
+      "package.json"
+    ],
+    "extraResources": [{ "from": "licenses", "to": "licenses" }],
+    "electronLanguages": ["en-US", "en-GB", "ms", "zh-CN", "zh-TW"],
+    "win": {
+      "target": [{ "target": "nsis", "arch": ["x64"] }],
+      "icon": "build/icon.ico",
+      "executableName": "MikesPDFStudio"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "shortcutName": "Mike's PDF Studio",
+      "uninstallDisplayName": "Mike's PDF Studio",
+      "artifactName": "MikesPDFStudio-Setup-${version}.${ext}",
+      "deleteAppDataOnUninstall": false
+    },
+    "fileAssociations": [
+      { "ext": "pdf", "name": "PDF Document", "description": "PDF document", "role": "Editor", "icon": "icon.ico" }
+    ],
+    "publish": [{ "provider": "github", "owner": "mike131419", "repo": "mikes-pdf-studio", "releaseType": "release" }]
+  }
+}

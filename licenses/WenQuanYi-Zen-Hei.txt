@@ -1,0 +1,5 @@
+The Chinese font used for typed text (assets/cjk.ttf, a subset) is WenQuanYi Zen Hei
+(c) 2005-2010 WenQuanYi Board of Trustees, http://wenq.org
+Licensed under the GNU GPL v2 with the font embedding exception:
+fonts may be embedded in documents (such as the PDFs you save)
+without those documents becoming subject to the GPL.

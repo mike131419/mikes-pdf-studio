@@ -1,0 +1,51 @@
+# Builds the Windows installer (Setup.exe) and publishes it as a GitHub Release.
+# Triggered by pushing a version tag, e.g.  git tag v1.2.0 && git push origin v1.2.0
+name: Build Windows installer
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Check the tag matches package.json
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          v=$(node -p "require('./package.json').version")
+          [ "v$v" = "${GITHUB_REF_NAME}" ] || { echo "Tag ${GITHUB_REF_NAME} does not match package.json version $v"; exit 1; }
+
+      - name: Install
+        run: npm install --no-audit --no-fund
+
+      - name: Build editor (desktop/index.html)
+        run: npm run build:html
+
+      - name: Build installer and publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx electron-builder --win --x64 --publish always
+
+      - name: Build installer only (manual run)
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        run: npx electron-builder --win --x64 --publish never
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer
+          path: |
+            release/*.exe
+            release/latest.yml
