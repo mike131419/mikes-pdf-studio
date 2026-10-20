@@ -52,8 +52,10 @@
 
 <aside id="sidebar">
   <div class="sidehead">
-    <span>Pages</span>
+    <span class="sidetitle">Pages</span>
     <div class="sidebtns">
+      <button id="btnOrganize" class="icon" title="Organize pages: large view to arrange pages (O)"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="8" rx="1"/><rect x="14" y="3" width="7" height="8" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></button>
+      <span class="sep"></span>
       <button id="btnRotL" class="icon" title="Rotate selected pages left"><svg viewBox="0 0 24 24"><path d="M4 4v6h6"/><path d="M5 14a8 8 0 1 0 2-8L4 10"/></svg></button>
       <button id="btnRotR" class="icon" title="Rotate selected pages right"><svg viewBox="0 0 24 24"><path d="M20 4v6h-6"/><path d="M19 14a8 8 0 1 1-2-8l3 4"/></svg></button>
       <button id="btnDelPages" class="icon" title="Delete selected pages"><svg viewBox="0 0 24 24"><path d="M5 7h14M10 7V4h4v3M7 7l1 13h8l1-13"/></svg></button>
@@ -61,7 +63,15 @@
     </div>
   </div>
   <div id="thumbs"></div>
-  <div class="sidehint">Drag pages to reorder. Ctrl/Shift-click to select several.</div>
+  <div class="sidefoot">
+    <label class="sizer" title="Page preview size (Ctrl + mouse wheel over the pages)">
+      <svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>
+      <input type="range" id="thumbSize" min="70" max="420" step="5" value="120">
+      <svg viewBox="0 0 24 24" class="big"><rect x="3" y="3" width="18" height="18" rx="1"/></svg>
+    </label>
+    <div class="sidehint">Drag pages to reorder. Ctrl/Shift-click to select several.</div>
+    <button id="btnOrganizeDone" class="primary small donebtn">Done</button>
+  </div>
 </aside>
 
 <main id="view">
@@ -165,6 +175,8 @@
 <script>/*__PDFLIB__*/</script>
 <script>/*__CJK__*/</script>
 <script>/*__REDACT__*/</script>
+<script>/*__SFNT__*/</script>
+<script>/*__FONTS__*/</script>
 <script>/*__APP__*/</script>
 </body>
 </html>

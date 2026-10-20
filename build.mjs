@@ -34,7 +34,7 @@ const cjkJs =
   `window.__CJK_MAP=${fs.readFileSync(path.join(root, 'assets/cjk-map.json'), 'utf8')};\n` +
   `window.__CJK_B64="${b64(path.join(root, 'assets/cjk.ttf'))}";\n` + src('cjk.js');
 const pdflib = fs.readFileSync(path.join(LIB, 'pdf-lib/dist/pdf-lib.min.js'), 'utf8');
-for (const [n, s] of [['pdf-lib', pdflib], ['app', src('app.js')], ['cjk', src('cjk.js')], ['redact', src('redact.js')]]) {
+for (const [n, s] of [['pdf-lib', pdflib], ['app', src('app.js')], ['cjk', src('cjk.js')], ['redact', src('redact.js')], ['fonts', src('fonts.js')], ['sfnt', fs.readFileSync(path.join(root, 'desktop', 'sfnt.js'), 'utf8')]]) {
   if (/<\/script|<!--/i.test(s)) throw new Error(`${n} contains a sequence that would break inline <script>`);
 }
 const html = src('app.html')
@@ -43,6 +43,8 @@ const html = src('app.html')
   .replace('/*__PDFLIB__*/', () => pdflib)
   .replace('/*__CJK__*/', () => cjkJs)
   .replace('/*__REDACT__*/', () => src('redact.js'))
+  .replace('/*__SFNT__*/', () => fs.readFileSync(path.join(root, 'desktop', 'sfnt.js'), 'utf8'))
+  .replace('/*__FONTS__*/', () => src('fonts.js'))
   .replace('/*__APP__*/', () => src('app.js'))
   .replace('/*__VERSION__*/', () => VERSION);
 

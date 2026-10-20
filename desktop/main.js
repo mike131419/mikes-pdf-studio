@@ -1,5 +1,6 @@
 // Mike's PDF Studio — Windows app shell (Electron). The editor itself is index.html.
-const { app, BrowserWindow, Menu, shell, dialog, ipcMain } = require('electron');
+const { app, BrowserWindow, Menu, shell, dialog, ipcMain, net } = require('electron');
+const { createFontService } = require('./fonts-host.js');
 const path = require('path');
 const fs = require('fs');
 
@@ -31,6 +32,13 @@ function sendFiles(paths) {
   for (const p of paths) { try { files.push({ name: path.basename(p), data: fs.readFileSync(p) }); } catch (e) { console.error(e); } }
   if (files.length) win.webContents.send('open-files', files);
 }
+// Fonts: list installed fonts, read one, or download + install a free one (Google Fonts)
+let fontSvc = null;
+const fromApp = e => win && e.sender === win.webContents;
+ipcMain.handle('fonts:list', e => fromApp(e) ? fontSvc.getList() : []);
+ipcMain.handle('fonts:read', (e, file, index) => fromApp(e) ? fontSvc.read(String(file), Number(index) || 0) : null);
+ipcMain.handle('fonts:download', (e, family, bold, italic) => fromApp(e) ? fontSvc.download(net, String(family), !!bold, !!italic) : null);
+
 ipcMain.on('renderer-ready', e => {
   if (!win || e.sender !== win.webContents) return;
   pageReady = true; const p = pending; pending = []; sendFiles(p);
@@ -58,7 +66,7 @@ app.on('second-instance', (e, argv, cwd) => {
   if (win) { if (win.isMinimized()) win.restore(); win.focus(); }
   sendFiles(pdfsFromArgs(argv, cwd));
 });
-app.whenReady().then(() => { createWindow(); pending.push(...pdfsFromArgs(process.argv)); setupAutoUpdate(); });
+app.whenReady().then(() => { fontSvc = createFontService(app); createWindow(); pending.push(...pdfsFromArgs(process.argv)); setupAutoUpdate(); });
 
 // Automatic updates from GitHub Releases (only in the installed app made by the Setup.exe).
 function setupAutoUpdate() {

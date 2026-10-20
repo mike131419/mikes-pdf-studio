@@ -15,7 +15,9 @@ Once installed, the app updates itself: when a new version is released it downlo
 
 - **View** PDFs; zoom; page thumbnails
 - **Edit existing text and pictures** like in Word: click a paragraph and type, change font, size, bold, italic and colour; move, resize or delete pictures. Replaced text is really removed from the saved file.
-- **OCR** for scanned pages (English, Malay, Chinese) turns scanned text into editable text. The engine downloads on first use.
+- **Keeps the original font** when you edit: the PDF's font is found on your PC, or downloaded and installed automatically if it's a free (Google) font. Commercial fonts that aren't installed are replaced by a free font with identical letter widths (e.g. Calibri → Carlito).
+- **OCR** for scanned pages (English, Malay, Chinese) turns scanned text into editable text, and the app works out which font the scan used by comparing the letters with the fonts on your PC. The engine downloads on first use.
+- **Organize pages**: large page view (button or press **O**), preview size slider / Ctrl + mouse wheel, drag pages to reorder
 - **Add text**, including Chinese (简体 / 繁體)
 - **Signatures**: draw, type or upload a photo (paper background removed automatically)
 - **Stamps**: stamp maker (APPROVED, PAID, LULUS, 已付款 …, rectangle or round chop with date and company name), or upload your company chop

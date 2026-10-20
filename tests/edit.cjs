@@ -12,7 +12,7 @@ const { execFileSync } = require('child_process'); const fs = require('fs');
     execFileSync('tesseract', ['ocr-in.png', 'ocr-out', '-l', 'eng', 'hocr'], { stdio: 'ignore' });
     return execFileSync('python3', ['hocr2json.py', 'ocr-out.hocr']).toString();
   });
-  await page.goto('file:///home/claude/pdfstudio/dist/PDF%20Studio/PDF%20Studio.html');
+  await page.goto('file:///home/claude/pdfstudio/desktop/index.html');
   await page.waitForFunction(() => window.__pdfstudio?.ready);
   const save = async name => {
     await page.evaluate(() => { window.showSaveFilePicker = undefined; });

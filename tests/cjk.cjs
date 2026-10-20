@@ -7,7 +7,7 @@ const { chromium } = require('/home/claude/.npm-global/lib/node_modules/playwrig
   page.on('console', m => { if (m.type() === 'error' || m.type()==='warning') errs.push(m.type()+': '+m.text()); });
   page.on('pageerror', e => errs.push('pageerror: ' + e.message));
   const t0 = Date.now();
-  await page.goto('file:///home/claude/pdfstudio/dist/PDF%20Studio/PDF%20Studio.html');
+  await page.goto('file:///home/claude/pdfstudio/desktop/index.html');
   await page.waitForFunction(() => window.__pdfstudio?.ready, null, { timeout: 30000 });
   console.log('startup ms', Date.now() - t0);
   await page.setInputFiles('#fileOpen', ['A.pdf']);

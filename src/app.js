@@ -73,6 +73,7 @@ const state = {
   undo: [], redo: [],
   pendingImg: null,
   textDefaults: { font: 'sans', bold: false, italic: false },
+  thumbW: 120, thumbBig: 220,
   ocrResults: new Map(), // OCR text per page+rotation (kept across undo)
 };
 const pageCache = new Map(); // `${srcId}:${idx}` -> Promise<PDFPageProxy>
@@ -249,14 +250,45 @@ async function renderPageCanvas(el) {
 }
 
 /* ------------------------------------------------------------ thumbnails */
-const THUMB_W = 120;
+const organizing = () => document.body.classList.contains('organize');
+const thumbW = () => organizing() ? state.thumbBig : state.thumbW;
+function applyThumbSize(rebuild = true) {
+  document.body.style.setProperty('--thumbw', thumbW() + 'px');
+  document.body.style.setProperty('--sidew', Math.min(state.thumbW + 76, 480) + 'px');
+  $('#thumbSize').value = thumbW();
+  if (rebuild) { buildThumbs(); if (!organizing()) { clearTimeout(applyThumbSize.t); applyThumbSize.t = setTimeout(() => state.pages.length && buildView(), 150); } }
+}
+function setThumbSize(v) {
+  v = clamp(Math.round(v), 70, 420);
+  if (organizing()) state.thumbBig = v; else state.thumbW = Math.min(v, 300);
+  store.set('pdfstudio.thumbSizes', [state.thumbW, state.thumbBig]);
+  applyThumbSize();
+}
+function setOrganize(on) {
+  if (on === organizing()) return;
+  if (on && !state.pages.length) { toast('Open a PDF first.'); return; }
+  commitEditing();
+  document.body.classList.toggle('organize', on);
+  $('#btnOrganize').classList.toggle('on', on);
+  applyThumbSize();
+  if (!on && state.currentKey) setTimeout(() => scrollToKey(state.currentKey), 50);
+  else if (on && state.currentKey) setTimeout(() => $(`.thumb[data-key="${state.currentKey}"]`)?.scrollIntoView({ block: 'center' }), 50);
+}
+$('#btnOrganize').onclick = () => setOrganize(!organizing());
+$('#btnOrganizeDone').onclick = () => setOrganize(false);
+$('#thumbSize').addEventListener('input', e => setThumbSize(+e.target.value));
+$('#thumbs').addEventListener('wheel', e => { if (e.ctrlKey) { e.preventDefault(); setThumbSize(thumbW() * (e.deltaY < 0 ? 1.12 : 1 / 1.12)); } }, { passive: false });
+$('#thumbs').addEventListener('dblclick', e => {
+  const t = e.target.closest('.thumb'); if (!t || !organizing()) return;
+  state.currentKey = t.dataset.key; setOrganize(false);
+});
 function buildThumbs() {
   const box = $('#thumbs');
   thumbObserver.disconnect();
   box.innerHTML = '';
   state.pages.forEach((p, i) => {
     const { W, H } = dispDims(p);
-    const s = THUMB_W / Math.max(W, H * 0.77);
+    const s = thumbW() / Math.max(W, H * 0.77);
     const t = document.createElement('div');
     t.className = 'thumb'; t.draggable = true; t.dataset.key = p.key;
     t.classList.toggle('selected', state.selPages.has(p.key));
@@ -298,7 +330,7 @@ function drawAnnotsOnCanvas(ctx, p, s) {
     } else if (a.type === 'image') {
       const im = imgEl(a.imgId); if (im.complete) ctx.drawImage(im, a.x * s, a.y * s, a.w * s, a.h * s);
     } else if (a.type === 'text') {
-      ctx.fillStyle = a.color; ctx.font = cssFont(a, a.size * s);
+      ctx.fillStyle = a.color; ctx.font = cssFont(a, a.size * s); ctx.fontKerning = 'none';
       const bl = baselineOf(a), lh = lhOf(a);
       linesOf(a).forEach((ln, i) => ctx.fillText(ln, a.x * s, (a.y + a.size * (bl + lh * i)) * s));
     }
@@ -351,7 +383,11 @@ $('#thumbs').addEventListener('dragover', e => {
   e.preventDefault(); e.stopPropagation();
   clearDropMarks();
   const t = e.target.closest('.thumb');
-  if (t) { const r = t.getBoundingClientRect(); t.classList.add(e.clientY < r.top + r.height / 2 ? 'drop-before' : 'drop-after'); }
+  if (t) {
+    const r = t.getBoundingClientRect();
+    const before = organizing() ? e.clientX < r.left + r.width / 2 : e.clientY < r.top + r.height / 2;
+    t.classList.add(before ? 'drop-before' : 'drop-after');
+  }
   else { const last = $$('.thumb').pop(); last?.classList.add('drop-after'); }
 });
 $('#thumbs').addEventListener('drop', e => {
@@ -475,15 +511,19 @@ const FONTS = {
   mono: { label: 'Mono (Courier)', css: '"Courier New", "Liberation Mono", Courier, monospace', asc: 0.833, desc: 0.300, std: ['Courier', 'CourierBold', 'CourierOblique', 'CourierBoldOblique'] },
 };
 const CJK_FONT = { css: `"${CJK.FAMILY}", sans-serif`, asc: CJK.ASC, desc: CJK.DESC };
-const isCjk = a => CJK.needs(a.text);
-const fontOf = a => isCjk(a) ? CJK_FONT : (FONTS[a.font] || FONTS.sans);
+const PSF = window.PDFStudioFonts;
+// The real font of an edited paragraph (the PDF's original font found on this PC), when it has every character typed
+const realFont = a => { const r = a.fk && PSF.get(a.fk); return r && r.f.covers(a.text) ? r : null; };
+const isCjk = a => !realFont(a) && CJK.needs(a.text);
+const fontOf = a => realFont(a) || (isCjk(a) ? CJK_FONT : (FONTS[a.font] || FONTS.sans));
 const lhOf = a => a.lh || 1.2;
 function baselineOf(a) { const f = fontOf(a), lh = lhOf(a); return (lh - (f.asc + f.desc)) / 2 + f.asc; }
 function cssFont(a, px) {
-  const plain = isCjk(a);
+  const plain = isCjk(a) || !!realFont(a);
   return `${!plain && a.italic ? 'italic ' : ''}${!plain && a.bold ? 'bold ' : ''}${px}px ${fontOf(a).css}`;
 }
 const measureCtx = document.createElement('canvas').getContext('2d');
+measureCtx.fontKerning = 'none'; // the PDF is written without kerning, so measure the same way
 const CJK_CHAR = /[⺀-鿿豈-﫿＀-￯　-〿]/;
 function layoutLines(a) {
   const paras = a.text.split('\n');
@@ -512,7 +552,7 @@ function layoutLines(a) {
 function relayout(a) { if (a.type === 'text') a.lines = layoutLines(a); }
 const linesOf = a => a.lines || layoutLines(a);
 function styleTextBody(b, a) {
-  const plain = isCjk(a);
+  const plain = isCjk(a) || !!realFont(a);
   Object.assign(b.style, {
     fontFamily: fontOf(a).css, fontSize: a.size * z() + 'px', lineHeight: String(lhOf(a)), color: a.color,
     fontWeight: !plain && a.bold ? 'bold' : 'normal', fontStyle: !plain && a.italic ? 'italic' : 'normal',
@@ -680,7 +720,7 @@ view.addEventListener('pointerdown', e => {
     if (wasEditing) return; // first click just finishes the current box
     e.preventDefault();
     const d = state.textDefaults;
-    const a = { id: newId(), type: 'text', text: '', size: +$('#fontSize').value, color: $('#textColor').value, font: d.font, bold: d.bold, italic: d.italic };
+    const a = { id: newId(), type: 'text', text: '', size: +$('#fontSize').value, color: $('#textColor').value, font: d.font, bold: d.bold, italic: d.italic, fk: d.fk || null, fname: d.fname || null };
     a.x = clamp(pt.x, 0, W - 10); a.y = clamp(pt.y - a.size * 0.6, 0, H - a.size);
     p.annots.push(a);
     renderAnnots(p); selectAnnot(key, a.id);
@@ -747,6 +787,7 @@ function endDrag() {
     return;
   }
   if (d.moved) {
+    if (d.mode === 'move') d.a.moved = true;
     pushUndo(d.snap); setDirty(); refreshThumbSoon(d.key);
     if (d.a.type === 'text' && d.mode === 'resize') { d.a.touched = true; relayout(d.a); renderAnnots(pageByKey(d.key)); selectAnnot(d.key, d.a.id); }
   }
@@ -803,7 +844,10 @@ function showTextStyle(a) {
     [...$('#fontSize').options].sort((x, y) => x.value - y.value).forEach(o2 => $('#fontSize').appendChild(o2));
     $('#fontSize').value = String(Math.round(a.size * 2) / 2);
   }
-  $('#textColor').value = a.color; $('#fontFamily').value = a.font || 'sans';
+  $('#textColor').value = a.color;
+  const rf = a.fk && PSF.get(a.fk);
+  if (rf) { ensureFamilyOption(rf.family); $('#fontFamily').value = 'fam:' + rf.family; }
+  else $('#fontFamily').value = a.font || 'sans';
   $('#btnBold').classList.toggle('on', !!a.bold); $('#btnItalic').classList.toggle('on', !!a.italic);
 }
 function applyTextStyle(change) {
@@ -824,9 +868,43 @@ function applyTextStyle(change) {
 }
 $('#fontSize').addEventListener('change', () => applyTextStyle({ size: +$('#fontSize').value }));
 $('#textColor').addEventListener('change', () => applyTextStyle({ color: $('#textColor').value }));
-$('#fontFamily').addEventListener('change', () => applyTextStyle({ font: $('#fontFamily').value }));
-$('#btnBold').addEventListener('click', () => { const a = selectedText(); applyTextStyle({ bold: !(a ? a.bold : state.textDefaults.bold) }); });
-$('#btnItalic').addEventListener('click', () => { const a = selectedText(); applyTextStyle({ italic: !(a ? a.italic : state.textDefaults.italic) }); });
+/* Font list: the 3 built-in PDF fonts plus every font installed on this PC */
+function ensureFamilyOption(fam) {
+  const sel = $('#fontFamily');
+  if ([...sel.options].some(o => o.value === 'fam:' + fam)) return;
+  let g = sel.querySelector('optgroup.pc');
+  if (!g) { g = document.createElement('optgroup'); g.className = 'pc'; g.label = 'Fonts on this PC'; sel.appendChild(g); }
+  const o = document.createElement('option'); o.value = 'fam:' + fam; o.textContent = fam; g.appendChild(o);
+}
+async function fillFontList() {
+  if (!PSF.available) return;
+  const fams = await PSF.families();
+  const sel = $('#fontFamily'), cur = sel.value;
+  sel.querySelector('optgroup.pc')?.remove();
+  const g = document.createElement('optgroup'); g.className = 'pc'; g.label = 'Fonts on this PC';
+  for (const f of fams) { const o = document.createElement('option'); o.value = 'fam:' + f; o.textContent = f; o.style.fontFamily = `"${f}"`; g.appendChild(o); }
+  sel.appendChild(g); sel.value = cur;
+}
+// Picks the face of the chosen family (or switches bold/italic within the same family)
+async function fontChange(kind) {
+  const a = selectedText(), d = state.textDefaults;
+  const cur = a || d, curRec = cur.fk && PSF.get(cur.fk);
+  let fam = curRec ? curRec.family : null, bold = !!cur.bold, italic = !!cur.italic, std = null;
+  if (kind === 'family') { const v = $('#fontFamily').value; if (v.startsWith('fam:')) fam = v.slice(4); else { fam = null; std = v; } }
+  if (kind === 'bold') bold = !bold;
+  if (kind === 'italic') italic = !italic;
+  if (!fam) return applyTextStyle({ fk: null, fname: null, font: std || cur.font || 'sans', bold, italic });
+  const rec = await PSF.resolveFamily(fam, bold, italic);
+  if (!rec) { toast(`Couldn't load the font “${fam}”.`, true); return; }
+  if (rec.bold !== bold || rec.italic !== italic) {
+    toast(`“${fam}” has no ${bold && rec.bold !== bold ? 'bold' : 'italic'} version on this PC.`, false, 4000);
+    if (kind !== 'family') { if (a) showTextStyle(a); return; }
+  }
+  applyTextStyle({ fk: rec.key, fname: rec.family, bold: rec.bold, italic: rec.italic });
+}
+$('#fontFamily').addEventListener('change', () => fontChange('family'));
+$('#btnBold').addEventListener('click', () => fontChange('bold'));
+$('#btnItalic').addEventListener('click', () => fontChange('italic'));
 for (const id of ['#btnBold', '#btnItalic']) $(id).addEventListener('pointerdown', e => e.preventDefault()); // keep the text caret
 
 /* ------------------------------------------------------------- Edit mode */
@@ -891,7 +969,8 @@ function fontStyleOf(pg, fontName, style) {
   const fam = style?.fontFamily || '';
   const mono = !!f?.isMonospace || /courier|mono|consol/i.test(name) || fam === 'monospace';
   const serif = !mono && (!!f?.isSerifFont || (/times|serif|roman|georgia|garamond|cambria|minion|book/i.test(name) && !/sans/i.test(name)) || fam === 'serif');
-  return { font: mono ? 'mono' : serif ? 'serif' : 'sans', bold: !!f?.bold || /bold|black|heavy|semibold|demi/i.test(name), italic: !!f?.italic || /italic|oblique/i.test(name) };
+  return { font: mono ? 'mono' : serif ? 'serif' : 'sans', bold: !!f?.bold || /bold|black|heavy|semibold|demi/i.test(name), italic: !!f?.italic || /italic|oblique/i.test(name),
+    pdfFont: String(f?.name || '').replace(/^[A-Z]{6}\+/, '') };
 }
 const median = arr => { const s = [...arr].sort((a, b) => a - b); return s.length ? s[s.length >> 1] : 0; };
 function joinLines(lines) {
@@ -918,7 +997,7 @@ function linesToBlocks(lines, prefix) {
       if (last.right < Math.min(q.right, l.right) - 5 * size) continue; // previous line ended early: new paragraph
       P = q; break;
     }
-    if (!P) { paras.push({ lines: [l], left: l.left, right: l.right, size: l.size, font: l.font, bold: l.bold, italic: l.italic, gap: 0 }); continue; }
+    if (!P) { paras.push({ lines: [l], left: l.left, right: l.right, size: l.size, font: l.font, bold: l.bold, italic: l.italic, pdfFont: l.pdfFont, gap: 0 }); continue; }
     if (P.lines.length === 1) P.gap = l.base - P.lines[0].base;
     P.lines.push(l); P.left = Math.min(P.left, l.left); P.right = Math.max(P.right, l.right);
   }
@@ -930,7 +1009,8 @@ function linesToBlocks(lines, prefix) {
     const y = Math.min(...q.lines.map(l => l.top ?? (l.base - f.asc * size)));
     const bottom = Math.max(...q.lines.map(l => l.bottom ?? (l.base + f.desc * size)));
     return { id: prefix + i, kind: 'text', text: joinLines(q.lines.map(l => l.text)), size, lh: clamp(lh, 0.9, 2.5), font: q.font, bold: q.bold, italic: q.italic,
-      firstBase: first, x: q.left, y, w: q.right - q.left, h: bottom - y };
+      pdfFont: q.pdfFont || '', firstBase: first, x: q.left, y, w: q.right - q.left, h: bottom - y,
+      lines: q.lines.map(l => ({ text: l.text, left: l.left, right: l.right, top: l.top ?? (l.base - f.asc * size), bottom: l.bottom ?? (l.base + f.desc * size), base: l.base })) };
   });
 }
 async function detectBlocks(p) {
@@ -962,10 +1042,10 @@ async function detectBlocks(p) {
     let cur = null;
     for (const it of r.items) {
       if (cur && it.x - cur.right > 2.2 * Math.max(cur.size, it.size)) { lines.push(cur); cur = null; }
-      if (!cur) { cur = { text: it.str, left: it.x, right: it.x + it.w, base: it.base, size: it.size, font: it.font, bold: it.bold, italic: it.italic, longest: it.str.length }; continue; }
+      if (!cur) { cur = { text: it.str, left: it.x, right: it.x + it.w, base: it.base, size: it.size, font: it.font, bold: it.bold, italic: it.italic, pdfFont: it.pdfFont, longest: it.str.length }; continue; }
       if (it.x - cur.right > 0.2 * it.size && !/\s$/.test(cur.text) && !/^\s/.test(it.str)) cur.text += ' ';
       cur.text += it.str; cur.right = Math.max(cur.right, it.x + it.w); cur.size = Math.max(cur.size, it.size);
-      if (it.str.length > cur.longest) Object.assign(cur, { font: it.font, bold: it.bold, italic: it.italic, longest: it.str.length });
+      if (it.str.length > cur.longest) Object.assign(cur, { font: it.font, bold: it.bold, italic: it.italic, pdfFont: it.pdfFont, longest: it.str.length });
     }
     if (cur) lines.push(cur);
   }
@@ -1053,12 +1133,16 @@ async function convertBlock(p, blockId, caretAt) {
     const margin = Math.max(b.x + b.w, info.contentRight || 0);
     const a = { id: newId(), type: 'text', text: b.text, orig: b.text, size: Math.round(b.size * 2) / 2, color: col.fg, font: b.font, bold: b.bold, italic: b.italic,
       lh: Math.round(b.lh * 100) / 100, w: margin - b.x + b.size * 0.6, fromBlock: b.id, cover: { x: b.x - pad, y: b.y - pad * 0.6, w: b.w + 2 * pad, h: b.h + pad * 1.2, color: col.bg } };
-    a.x = b.x; a.y = b.firstBase - a.size * baselineOf(a);
+    a.x = b.x; a.base0 = b.firstBase; a.y = b.firstBase - a.size * baselineOf(a);
     relayout(a);
     const before = snapshot();
     p.annots.push(a);
     renderAnnots(p); selectAnnot(p.key, a.id);
     startEditing(p.key, a.id, false, { before, fromBlockNew: true, caretAt });
+    if (PSF.available) {
+      if (b.pdfFont) findOriginalFont(p, a, b.pdfFont);
+      else if (/^o/.test(b.id)) matchScannedFont(p, a, b, h);
+    }
   } else {
     const s = h.scale, c = document.createElement('canvas');
     c.width = Math.max(1, Math.round(b.w * s)); c.height = Math.max(1, Math.round(b.h * s));
@@ -1068,6 +1152,124 @@ async function convertBlock(p, blockId, caretAt) {
     addAnnot(p, { id: newId(), type: 'image', imgId, x: b.x, y: b.y, w: b.w, h: b.h, fromBlock: b.id, cover: { x: b.x - 0.5, y: b.y - 0.5, w: b.w + 1, h: b.h + 1, color: col.bg } });
     status('Picture: drag to move, drag the corner to resize, Delete to remove it.');
   }
+}
+
+/* ------------------------------------------------- keeping the original font */
+// After a paragraph is opened for editing, look up its real font (installed / downloaded / free equivalent)
+// and switch the editable copy to it, keeping the text sitting on the same baseline.
+const fontNotices = new Set();
+function applyRealFont(p, a, rec, newSize) {
+  if (!p.annots.includes(a)) return;
+  a.fk = rec.key; a.fname = rec.family; a.bold = rec.bold; a.italic = rec.italic;
+  if (newSize) a.size = newSize;
+  if (a.base0 != null && !a.moved) a.y = a.base0 - a.size * baselineOf(a);
+  const ed = editing && editing.id === a.id ? editing : null;
+  if (ed) { const body = ed.el.querySelector('.tbody'); styleTextBody(body, { ...a, text: body.innerText }); placeEl(ed.el, a); }
+  else { relayout(a); renderAnnots(p); selectAnnot(p.key, a.id); }
+  if (selectedText() === a) showTextStyle(a);
+  refreshThumbSoon(p.key);
+}
+async function findOriginalFont(p, a, pdfName) {
+  try {
+    const r = await PSF.resolvePdfFont(pdfName, a.bold, a.italic, msg => status(msg));
+    status('Ready');
+    const shown = pdfName.replace(/[,\-].*$/, '').replace(/(PS)?MT$/, '');
+    if (!r) {
+      if (!fontNotices.has(shown)) { fontNotices.add(shown); toast(`The font “${shown}” isn't on this PC and isn't free to download, so the closest standard font is used.`, false, 6000); }
+      return;
+    }
+    applyRealFont(p, a, r.rec);
+    const key = shown + r.how;
+    if (fontNotices.has(key)) return; fontNotices.add(key);
+    if (r.how === 'downloaded') toast(`Downloaded and installed the font “${r.rec.family}”.`, false, 5000);
+    else if (r.how === 'substitute') toast(`“${r.original}” isn't on this PC; using ${r.name}, which has identical letter sizes.`, false, 6000);
+    else if (r.how === 'substitute-downloaded') toast(`“${r.original}” isn't free to download; installed ${r.name}, which has identical letter sizes.`, false, 6000);
+  } catch (e) { console.warn('font lookup failed', e); status('Ready'); }
+}
+
+/* Scanned pages contain pictures of letters, not fonts. To keep the look, the scanned line is compared
+   with the same words drawn in each likely font on this PC (shape and proportions), and the closest font,
+   weight and size are used. */
+const SCAN_FONTS_LATIN = ['Arial', 'Helvetica', 'Calibri', 'Aptos', 'Times New Roman', 'Cambria', 'Georgia', 'Garamond', 'Book Antiqua', 'Palatino Linotype',
+  'Verdana', 'Tahoma', 'Segoe UI', 'Trebuchet MS', 'Century Gothic', 'Century Schoolbook', 'Bookman Old Style', 'Franklin Gothic Book', 'Gill Sans MT',
+  'Arial Narrow', 'Candara', 'Corbel', 'Constantia', 'Courier New', 'Liberation Sans', 'Liberation Serif', 'DejaVu Sans', 'DejaVu Serif', 'Carlito', 'Caladea'];
+const SCAN_FONTS_CJK = ['Microsoft YaHei', 'SimSun', 'SimHei', 'DengXian', 'Microsoft JhengHei', 'PMingLiU', 'KaiTi', 'WenQuanYi Zen Hei', 'Noto Sans CJK SC'];
+function inkBox(ctx, w, h, bgLum) {
+  const d = ctx.getImageData(0, 0, w, h).data, m = new Float32Array(w * h);
+  let x0 = w, y0 = h, x1 = -1, y1 = -1;
+  for (let i = 0; i < w * h; i++) {
+    const L = 0.299 * d[i * 4] + 0.587 * d[i * 4 + 1] + 0.114 * d[i * 4 + 2];
+    const ink = clamp((bgLum - L) / Math.max(40, bgLum * 0.6), 0, 1);
+    m[i] = ink;
+    if (ink > 0.35) { const x = i % w, y = (i / w) | 0; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+  }
+  return { m, w, h, x0, y0, x1, y1 };
+}
+function sampleBox(ib, W, H) { // ink box resampled to W x H (area average)
+  const out = new Float32Array(W * H), bw = ib.x1 - ib.x0 + 1, bh = ib.y1 - ib.y0 + 1;
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const sx0 = ib.x0 + Math.floor(x * bw / W), sx1 = ib.x0 + Math.max(Math.floor((x + 1) * bw / W), Math.floor(x * bw / W) + 1);
+    const sy0 = ib.y0 + Math.floor(y * bh / H), sy1 = ib.y0 + Math.max(Math.floor((y + 1) * bh / H), Math.floor(y * bh / H) + 1);
+    let s = 0, c = 0;
+    for (let yy = sy0; yy < sy1; yy++) for (let xx = sx0; xx < sx1; xx++) { s += ib.m[yy * ib.w + xx]; c++; }
+    out[y * W + x] = c ? s / c : 0;
+  }
+  return out;
+}
+function similarity(A, B) { // correlation of two ink maps
+  let ma = 0, mb = 0; const n = A.length;
+  for (let i = 0; i < n; i++) { ma += A[i]; mb += B[i]; }
+  ma /= n; mb /= n;
+  let num = 0, da = 0, db = 0;
+  for (let i = 0; i < n; i++) { const x = A[i] - ma, y = B[i] - mb; num += x * y; da += x * x; db += y * y; }
+  return num / Math.sqrt(da * db || 1);
+}
+async function matchScannedFont(p, a, b, h) {
+  try {
+    const line = [...(b.lines || [])].sort((l1, l2) => (l2.right - l2.left) - (l1.right - l1.left))[0];
+    if (!line || line.text.length < 3) return;
+    const cjk = CJK.needs(line.text);
+    const all = await PSF.families(), have = new Set(all.map(PSF.famKey));
+    const cands = (cjk ? SCAN_FONTS_CJK : SCAN_FONTS_LATIN).filter(f => have.has(PSF.famKey(f)));
+    if (!cands.length) return;
+    status('Matching the scanned font…');
+    // the scanned line
+    const s = h.scale, pad = 2;
+    const cx = Math.max(0, Math.floor((line.left - pad) * s)), cy = Math.max(0, Math.floor((line.top - pad) * s));
+    const cw = Math.min(h.canvas.width - cx, Math.ceil((line.right - line.left + 2 * pad) * s)), ch = Math.min(h.canvas.height - cy, Math.ceil((line.bottom - line.top + 2 * pad) * s));
+    const sc = Math.min(1, 900 / cw), crop = document.createElement('canvas');
+    crop.width = Math.max(1, Math.round(cw * sc)); crop.height = Math.max(1, Math.round(ch * sc));
+    const cctx = crop.getContext('2d', { willReadFrequently: true });
+    cctx.drawImage(h.canvas, cx, cy, cw, ch, 0, 0, crop.width, crop.height);
+    const bgL = (() => { const c = parseInt(sampleColors(h, { x: line.left, y: line.top, w: line.right - line.left, h: line.bottom - line.top }).bg.slice(1), 16); return 0.299 * (c >> 16) + 0.587 * ((c >> 8) & 255) + 0.114 * (c & 255); })();
+    const scan = inkBox(cctx, crop.width, crop.height, bgL);
+    if (scan.x1 < 0) { status('Ready'); return; }
+    const sw = scan.x1 - scan.x0 + 1, sh = scan.y1 - scan.y0 + 1;
+    const GW = clamp(Math.round(24 * sw / sh), 24, 480), GH = 24;
+    const target = sampleBox(scan, GW, GH);
+    let best = null;
+    const R = document.createElement('canvas'), rctx = R.getContext('2d', { willReadFrequently: true });
+    for (const fam of cands) for (const bold of [false, true]) {
+      const e = await PSF.faceOf(fam, bold, false);
+      if (!e || (bold && !e.bold) || (!bold && e.bold)) continue;
+      let rec; try { rec = await PSF.load(e); } catch { continue; }
+      if (!rec.f.covers(line.text)) continue;
+      const px = 64; rctx.font = `${px}px ${rec.css}`; rctx.fontKerning = 'none';
+      const tw = Math.ceil(rctx.measureText(line.text).width);
+      R.width = tw + 20; R.height = Math.ceil(px * 1.6);
+      rctx.fillStyle = '#fff'; rctx.fillRect(0, 0, R.width, R.height);
+      rctx.font = `${px}px ${rec.css}`; rctx.fontKerning = 'none'; rctx.fillStyle = '#000'; rctx.textBaseline = 'alphabetic';
+      rctx.fillText(line.text, 10, Math.round(px * 1.15));
+      const r = inkBox(rctx, R.width, R.height, 255);
+      if (r.x1 < 0) continue;
+      const rw = r.x1 - r.x0 + 1, rh = r.y1 - r.y0 + 1;
+      const aspect = Math.abs(Math.log((rw / rh) / (sw / sh)));
+      const score = similarity(target, sampleBox(r, GW, GH)) - 1.5 * aspect;
+      if (!best || score > best.score) best = { score, rec, size: px * ((sw / sc / s) / rw) };
+    }
+    status('Ready');
+    if (best && best.score > 0.2) applyRealFont(p, a, best.rec, Math.round(best.size * 2) / 2);
+  } catch (e) { console.warn('font matching failed', e); status('Ready'); }
 }
 
 /* -------------------------------------------------------------------- OCR */
@@ -1533,12 +1735,19 @@ async function buildPdf(pageList) {
     };
     // Chinese text: collect every character first so the embedded font contains only what's used
     let cjkEmb = null; const cjkLines = new Map();
+    const realEmb = new Map(), realLines = new Map(); // edited text in its original font
     for (const p of pageList) for (const a of p.annots) if (a.type === 'text') {
-      if (CJK.needs(a.text)) { await CJK.load(); if (!cjkEmb) cjkEmb = CJK.embedder(out); }
+      const rf = realFont(a);
+      if (!rf && CJK.needs(a.text)) { await CJK.load(); if (!cjkEmb) cjkEmb = CJK.embedder(out); }
       if (a.w) relayout(a); // fonts are certainly loaded now
-      if (CJK.needs(a.text)) cjkLines.set(a, linesOf(a).map(l => cjkEmb.gids(l)));
+      if (rf) {
+        if (!realEmb.has(rf.key)) realEmb.set(rf.key, window.PDFStudioSfnt.makeEmbedder(PDFLib, out, rf.f, rf.ps));
+        const emb = realEmb.get(rf.key);
+        realLines.set(a, { emb, lines: linesOf(a).map(l => emb.gids(l)) });
+      } else if (CJK.needs(a.text)) cjkLines.set(a, linesOf(a).map(l => cjkEmb.gids(l)));
     }
     cjkEmb?.finish();
+    for (const emb of realEmb.values()) emb.finish();
     const embedded = new Map();
     let replaced = false;
     const safe = (str, font) => [...str].map(ch => { try { font.encodeText(ch); return ch; } catch { replaced = true; return '?'; } }).join('');
@@ -1576,13 +1785,14 @@ async function buildPdf(pageList) {
           const [x, y] = toPdf(a.x, a.y + a.h);
           cp.drawImage(img, { x, y, width: a.w, height: a.h, rotate: degrees(r) });
         } else if (a.type === 'text') {
-          const bl = baselineOf(a), lh = lhOf(a), glyphLines = cjkLines.get(a);
-          const font = glyphLines ? null : await fontFor(a);
+          const bl = baselineOf(a), lh = lhOf(a), glyphLines = cjkLines.get(a), real = realLines.get(a);
+          const font = glyphLines || real ? null : await fontFor(a);
           linesOf(a).forEach((line, i) => {
             if (!line) return;
             const [x, y] = toPdf(a.x, a.y + a.size * (bl + lh * i));
             const opts = { x, y, size: a.size, color: hexToRgb(a.color), rotate: degrees(r) };
-            if (glyphLines) cjkEmb.draw(cp, glyphLines[i], opts);
+            if (real) real.emb.draw(cp, real.lines[i], opts);
+            else if (glyphLines) cjkEmb.draw(cp, glyphLines[i], opts);
             else cp.drawText(safe(line, font), { ...opts, font });
           });
         }
@@ -1672,7 +1882,7 @@ document.addEventListener('keydown', e => {
     else if (state.selPages.size) { e.preventDefault(); deletePages(); }
     return;
   }
-  if (e.key === 'Escape') { selectAnnot(null); setSelection([]); setTool('select'); return; }
+  if (e.key === 'Escape') { if (organizing()) { setOrganize(false); return; } selectAnnot(null); setSelection([]); setTool('select'); return; }
   if (state.selAnnot && e.key.startsWith('Arrow')) {
     e.preventDefault();
     const { p, a } = findAnnot(state.selAnnot.key, state.selAnnot.id);
@@ -1684,6 +1894,7 @@ document.addEventListener('keydown', e => {
     return;
   }
   if (!ctrl && !e.altKey && state.pages.length) {
+    if (k === 'o') { setOrganize(!organizing()); return; }
     const map = { v: 'select', e: 'edit', t: 'text', w: 'whiteout', h: 'highlight' };
     if (map[k]) setTool(map[k]);
     if (k === 's') openSigModal('sign');
@@ -1714,11 +1925,14 @@ window.addEventListener('beforeunload', e => { if (state.dirty) { e.preventDefau
 /* ------------------------------------------------------------------ init */
 (async () => {
   document.body.dataset.tool = 'select';
+  { const sz = store.get('pdfstudio.thumbSizes', null); if (Array.isArray(sz)) { state.thumbW = clamp(+sz[0] || 120, 70, 300); state.thumbBig = clamp(+sz[1] || 220, 70, 420); } }
+  applyThumbSize(false);
   updateButtons(); updateTextOpts(); setDirty(false);
   status('Loading…');
   try { await initPdfjs(); status('Ready — open a PDF or drag one onto the window.'); setTimeout(() => CJK.load().catch(console.error), 500); }
   catch (e) { console.error(e); status('Error'); toast('PDF engine failed to start: ' + e.message, true, 10000); }
   // Files handed over by Windows ("Open with", double-clicking a PDF) when running as the installed app
+  setTimeout(() => fillFontList().catch(console.error), 1500);
   if (window.pdfStudioHost) window.pdfStudioHost.onOpenFiles(list => {
     const files = list.map(f => new File([f.data], f.name, { type: 'application/pdf' }));
     openFiles(files, false);

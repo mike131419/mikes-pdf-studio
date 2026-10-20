@@ -8,7 +8,7 @@
 html,body{height:100%;margin:0}
 body{
   font:13px/1.4 "Segoe UI",system-ui,-apple-system,Roboto,Arial,sans-serif;color:var(--text);background:var(--bg);
-  display:grid;grid-template-columns:196px 1fr;grid-template-rows:auto 1fr auto;
+  display:grid;grid-template-columns:var(--sidew,196px) 1fr;grid-template-rows:auto 1fr auto;
   grid-template-areas:"tb tb" "side view" "st st";overflow:hidden;user-select:none;
 }
 svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex:none}
@@ -38,8 +38,28 @@ input[type=color]{width:30px;height:28px;border:1px solid var(--line);border-rad
 .sidehead{display:flex;align-items:center;justify-content:space-between;padding:8px 8px 6px 12px;font-weight:600;border-bottom:1px solid var(--line)}
 .sidebtns{display:flex}
 #thumbs{flex:1;overflow-y:auto;padding:10px 0 20px}
-.sidehint{font-size:11px;color:var(--muted);padding:8px 12px;border-top:1px solid var(--line)}
-.thumb{margin:0 auto 12px;width:150px;display:flex;flex-direction:column;align-items:center;cursor:pointer;position:relative}
+.sidefoot{border-top:1px solid var(--line);padding:6px 10px 8px;display:flex;flex-direction:column;gap:4px}
+.sidehint{font-size:11px;color:var(--muted)}
+.sizer{display:flex;align-items:center;gap:6px;color:var(--muted)}
+.sizer input{flex:1;min-width:0}
+.sizer svg{width:12px;height:12px}.sizer svg.big{width:17px;height:17px}
+.sidebtns .sep{width:1px;height:18px;background:var(--line);margin:0 3px}
+#btnOrganize.on{background:#e3e9fb;border-color:#b9c6e4;color:#1e3a8a}
+.donebtn{display:none}
+/* Organize mode: the page list fills the window as a grid of large pages */
+body.organize #sidebar{grid-column:1 / -1;border-right:none;background:var(--bg)}
+body.organize #view,body.organize #empty{display:none}
+body.organize #thumbs{display:flex;flex-wrap:wrap;align-content:flex-start;gap:26px 22px;padding:24px 28px 60px}
+body.organize .thumb{margin:0}
+body.organize .sidefoot{flex-direction:row;align-items:center;gap:18px;padding:8px 16px}
+body.organize .sizer{width:260px}
+body.organize .donebtn{display:inline-flex;margin-left:auto}
+body.organize .sidetitle::after{content:" — organize: drag pages to change their order, double-click to open";font-weight:400;color:var(--muted)}
+body.organize .thumb.drop-before::before,body.organize .thumb.drop-after::after{top:6px;bottom:22px;left:auto;right:auto;width:4px;height:auto}
+body.organize .thumb.drop-before::before{left:-14px}
+body.organize .thumb.drop-after::after{right:-14px}
+body.organize .thumb .tnum{font-size:13px}
+.thumb{margin:0 auto 12px;width:calc(var(--thumbw,120px) + 30px);display:flex;flex-direction:column;align-items:center;cursor:pointer;position:relative}
 .thumb .tframe{border:2px solid transparent;border-radius:4px;padding:2px;background:transparent;line-height:0}
 .thumb canvas{background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.25);display:block}
 .thumb .tnum{font-size:11px;color:var(--muted);margin-top:3px;font-variant-numeric:tabular-nums}
@@ -72,7 +92,7 @@ button.small{padding:4px 10px}
 @keyframes spin{to{transform:rotate(360deg)}}
 .fmt{width:28px;justify-content:center;font-family:Georgia,serif;font-size:15px}
 .fmt.on{background:#e3e9fb;border-color:#b9c6e4;color:#1e3a8a}
-#fontFamily{max-width:128px}
+#fontFamily{max-width:170px}
 .stampgrid{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:center}
 .stampform{display:flex;flex-direction:column;gap:10px}
 .stampform>label{display:flex;flex-direction:column;gap:4px;color:var(--muted);font-size:12px}
@@ -92,7 +112,7 @@ body[data-tool=whiteout] .page,body[data-tool=highlight] .page{cursor:crosshair}
 .annot-image img{width:100%;height:100%;display:block;pointer-events:none}
 .annot-image,.annot-rect,.annot-text{cursor:move}
 .annot-rect.hl{mix-blend-mode:multiply}
-.annot-text .tbody{white-space:pre;line-height:1.2;font-family:Arial,Helvetica,sans-serif;outline:none;min-width:4px;padding:0}
+.annot-text .tbody{font-kerning:none;font-variant-ligatures:none;white-space:pre;line-height:1.2;font-family:Arial,Helvetica,sans-serif;outline:none;min-width:4px;padding:0}
 .annot-text.editing{cursor:text;outline:1.5px dashed var(--sel);outline-offset:2px}
 .annot-text.editing .tbody{user-select:text;cursor:text}
 .annot .rs{position:absolute;right:-6px;bottom:-6px;width:12px;height:12px;background:#fff;border:2px solid var(--sel);border-radius:3px;cursor:nwse-resize;display:none}
@@ -158,8 +178,6 @@ body.dragover #dropShade{display:flex}
 
 @media (max-width:900px){
   #toolbar button span{display:none}
-  body{grid-template-columns:150px 1fr}
-  .thumb{width:120px}
 }
 
 .tabpane .row .check{margin-top:0}
