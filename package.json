@@ -1,13 +1,16 @@
 {
   "name": "mikes-pdf-studio",
   "productName": "Mike's PDF Studio",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Offline PDF editor for Windows: view, edit text and pictures, OCR, sign, stamp, merge and organise pages.",
   "author": "Mike",
   "license": "SEE LICENSE IN LICENSE",
   "private": true,
   "main": "desktop/main.js",
-  "repository": { "type": "git", "url": "https://github.com/mike131419/mikes-pdf-studio.git" },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mike131419/mikes-pdf-studio.git"
+  },
   "scripts": {
     "build:html": "node build.mjs",
     "start": "node build.mjs && electron .",
@@ -25,7 +28,10 @@
     "appId": "com.mike.pdfstudio",
     "productName": "Mike's PDF Studio",
     "copyright": "Mike",
-    "directories": { "output": "release", "buildResources": "build" },
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
     "files": [
       "desktop/main.js",
       "desktop/preload.js",
@@ -33,17 +39,35 @@
       "desktop/icon.png",
       "package.json"
     ],
-    "extraResources": [{ "from": "licenses", "to": "licenses" }],
-    "electronLanguages": ["en-US", "en-GB", "ms", "zh-CN", "zh-TW"],
+    "extraResources": [
+      {
+        "from": "licenses",
+        "to": "licenses"
+      }
+    ],
+    "electronLanguages": [
+      "en-US",
+      "en-GB",
+      "ms",
+      "zh-CN",
+      "zh-TW"
+    ],
     "win": {
-      "target": [{ "target": "nsis", "arch": ["x64"] }],
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
       "icon": "build/icon.ico",
       "executableName": "MikesPDFStudio"
     },
     "nsis": {
-      "oneClick": false,
+      "oneClick": true,
       "perMachine": false,
-      "allowToChangeInstallationDirectory": true,
+      "runAfterFinish": true,
       "createDesktopShortcut": "always",
       "createStartMenuShortcut": true,
       "shortcutName": "Mike's PDF Studio",
@@ -52,8 +76,21 @@
       "deleteAppDataOnUninstall": false
     },
     "fileAssociations": [
-      { "ext": "pdf", "name": "PDF Document", "description": "PDF document", "role": "Editor", "icon": "icon.ico" }
+      {
+        "ext": "pdf",
+        "name": "PDF Document",
+        "description": "PDF document",
+        "role": "Editor",
+        "icon": "icon.ico"
+      }
     ],
-    "publish": [{ "provider": "github", "owner": "mike131419", "repo": "mikes-pdf-studio", "releaseType": "release" }]
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "mike131419",
+        "repo": "mikes-pdf-studio",
+        "releaseType": "release"
+      }
+    ]
   }
 }
