@@ -970,13 +970,12 @@ function sampleColors(h, box) {
   const hist = new Uint32Array(766), total = d.length / 4;
   for (let i = 0; i < d.length; i += 4) hist[diff(i)]++;
   let cut = 765, acc = 0;
-  for (; cut > 0; cut--) { acc += hist[cut]; if (acc >= total * 0.05) break; }
+  for (; cut > 0; cut--) { acc += hist[cut]; if (acc >= total * 0.02) break; }
   let fg = [0, 0, 0];
   if (cut > 60) {
     let n = 0;
     for (let i = 0; i < d.length; i += 4) if (diff(i) >= cut) { fg[0] += d[i]; fg[1] += d[i + 1]; fg[2] += d[i + 2]; n++; }
-    fg = fg.map(v => v / Math.max(1, n));
-    if (fg.every(v => v < 90)) fg = fg.map(v => v * 0.5); // anti-aliasing makes black look grey
+    fg = fg.map(v => v / Math.max(1, n)); // the 2% strongest ink pixels = the solid centre of the letters
   }
   return { bg: toHex(bg), fg: toHex(fg) };
 }
@@ -1001,8 +1000,17 @@ function joinLines(lines) {
   }, '');
 }
 /** Groups lines (sorted top to bottom) into paragraphs. Each line: {text, left, right, base, size, font, bold, italic} */
+/* Table-like layouts (a label on the left, its value on the right) are rows of separate cells, not
+   paragraphs: a line that has another piece of text beside it on the same row is marked as a cell. */
+function markCells(lines) {
+  for (const l of lines) l.cell = lines.some(m => m !== l && Math.abs(m.base - l.base) < 0.5 * Math.max(m.size, l.size)
+    && (m.left > l.right + 0.5 * l.size || m.right < l.left - 0.5 * l.size));
+}
 function linesToBlocks(lines, prefix) {
   const paras = [];
+  const xs = lines.map(l => l.left), xe = lines.map(l => l.right);
+  const contentW = lines.length ? Math.max(...xe) - Math.min(...xs) : 0;
+  const isShort = l => contentW > 0 && (l.right - l.left) < 0.5 * contentW;
   for (const l of lines) {
     let P = null;
     for (let i = paras.length - 1; i >= 0 && i >= paras.length - 8; i--) {
@@ -1013,6 +1021,9 @@ function linesToBlocks(lines, prefix) {
       if (q.lines.length > 1 && Math.abs(gap - q.gap) > 0.25 * size) continue;
       if (l.left < q.left - 1.5 * size || l.left > q.left + 4 * size || l.right < q.left || l.left > q.right) continue;
       if (last.right < Math.min(q.right, l.right) - 5 * size) continue; // previous line ended early: new paragraph
+      if (l.cell || last.cell) continue; // rows of a table are separate cells
+      // two short lines one under the other (headings, label lists) are separate items, not one wrapped paragraph
+      if (isShort(last) && isShort(l) && !/[,;:\-–(&]$/.test(last.text) && /^[\p{Lu}\p{N}]/u.test(l.text)) continue;
       P = q; break;
     }
     if (!P) { paras.push({ lines: [l], left: l.left, right: l.right, size: l.size, font: l.font, bold: l.bold, italic: l.italic, pdfFont: l.pdfFont, gap: 0 }); continue; }
@@ -1059,6 +1070,8 @@ async function detectBlocks(p) {
     r.items.sort((a, b) => a.x - b.x);
     let cur = null;
     for (const it of r.items) {
+      // PDF.js inserts whitespace items that can span the whole gap between two table cells: they mark a space but must not glue cells together
+      if (!it.str.trim()) { if (cur && !/\s$/.test(cur.text)) cur.text += ' '; continue; }
       if (cur && it.x - cur.right > 2.2 * Math.max(cur.size, it.size)) { lines.push(cur); cur = null; }
       if (!cur) { cur = { text: it.str, left: it.x, right: it.x + it.w, base: it.base, size: it.size, font: it.font, bold: it.bold, italic: it.italic, pdfFont: it.pdfFont, longest: it.str.length }; continue; }
       if (it.x - cur.right > 0.2 * it.size && !/\s$/.test(cur.text) && !/^\s/.test(it.str)) cur.text += ' ';
@@ -1068,6 +1081,7 @@ async function detectBlocks(p) {
     if (cur) lines.push(cur);
   }
   const textLines = lines.map(l => ({ ...l, text: l.text.replace(/\s+/g, ' ').trim() })).filter(l => l.text);
+  markCells(textLines);
   const blocks = linesToBlocks(textLines, 't');
   // pictures
   const ops = await pg.getOperatorList(), OPS = pdfjsLib.OPS;
@@ -1148,7 +1162,9 @@ async function convertBlock(p, blockId, caretAt) {
   if (b.kind === 'text') {
     const pad = Math.max(1, b.size * 0.15);
     // text may wrap out to the page's right text margin (like a Word paragraph), not just the original width
-    const margin = Math.max(b.x + b.w, info.contentRight || 0);
+    let margin = Math.max(b.x + b.w, info.contentRight || 0);
+    // one-line items (headings, table cells, labels) can grow to the right up to the page margin
+    if ((b.lines || []).length <= 1) margin = Math.max(margin, dispDims(p).W - Math.max(36, Math.min(72, b.x)));
     const a = { id: newId(), type: 'text', text: b.text, orig: b.text, size: Math.round(b.size * 2) / 2, color: col.fg, font: b.font, bold: b.bold, italic: b.italic,
       lh: Math.round(b.lh * 100) / 100, w: margin - b.x + b.size * 0.6, fromBlock: b.id, cover: { x: b.x - pad, y: b.y - pad * 0.6, w: b.w + 2 * pad, h: b.h + pad * 1.2, color: col.bg } };
     a.x = b.x; a.base0 = b.firstBase; a.y = b.firstBase - a.size * baselineOf(a);
@@ -1158,8 +1174,8 @@ async function convertBlock(p, blockId, caretAt) {
     renderAnnots(p); selectAnnot(p.key, a.id);
     startEditing(p.key, a.id, false, { before, fromBlockNew: true, caretAt });
     if (PSF.available) {
-      if (b.pdfFont) findOriginalFont(p, a, b.pdfFont);
-      else if (/^o/.test(b.id)) matchScannedFont(p, a, b, h);
+      if (b.pdfFont) findOriginalFont(p, a, b.pdfFont, b, h);
+      else if (/^o/.test(b.id)) matchScannedFont(p, a, b, h, { suggest: true });
     }
   } else {
     const s = h.scale, c = document.createElement('canvas');
@@ -1187,15 +1203,21 @@ function applyRealFont(p, a, rec, newSize) {
   if (selectedText() === a) showTextStyle(a);
   refreshThumbSoon(p.key);
 }
-async function findOriginalFont(p, a, pdfName) {
+async function findOriginalFont(p, a, pdfName, b, h) {
   try {
     diag('font lookup', pdfName, a.bold ? 'bold' : '', a.italic ? 'italic' : '');
     const r = await PSF.resolvePdfFont(pdfName, a.bold, a.italic, msg => status(msg));
-    diag('font lookup result', pdfName, r ? `${r.how} ${r.rec.family} ${r.rec.style}` : 'none');
+    diag('font lookup result', pdfName, r && r.rec ? `${r.how} ${r.rec.family} ${r.rec.style}` : 'none');
     status('Ready');
-    const shown = pdfName.replace(/[,\-].*$/, '').replace(/(PS)?MT$/, '');
-    if (!r) {
-      if (!fontNotices.has(shown)) { fontNotices.add(shown); toast(`The font “${shown}” isn't on this PC and isn't free to download, so the closest standard font is used.`, false, 6000); }
+    const shown = r && r.display || pdfName.replace(/[,\-].*$/, '').replace(/(PS)?MT$/, '');
+    if (!r || r.none) {
+      // Not installed and not downloadable: pick the most similar-looking font on this PC instead of a generic one
+      const best = b && h ? await matchScannedFont(p, a, b, h, { weight: r && r.weight, italic: r && r.italic, keepSize: true, suggest: true }) : null;
+      if (!fontNotices.has(shown)) {
+        fontNotices.add(shown);
+        toast(best ? `“${shown}” isn't on this PC and couldn't be downloaded. Using the closest-looking font, ${best.rec.family}. Other close matches are at the top of the font list.`
+                   : `The font “${shown}” isn't on this PC and isn't free to download, so the closest standard font is used.`, false, 8000);
+      }
       return;
     }
     applyRealFont(p, a, r.rec);
@@ -1244,15 +1266,18 @@ function similarity(A, B) { // correlation of two ink maps
   for (let i = 0; i < n; i++) { const x = A[i] - ma, y = B[i] - mb; num += x * y; da += x * x; db += y * y; }
   return num / Math.sqrt(da * db || 1);
 }
-async function matchScannedFont(p, a, b, h) {
+// Families with a similar look to popular web/brand fonts, checked as well when looking for a look-alike
+const LOOKALIKE_EXTRA = ['Century Gothic', 'Futura', 'Futura PT', 'Avenir', 'Avenir Next', 'Avenir LT Std', 'Gotham', 'Montserrat', 'Poppins', 'Raleway', 'Nunito',
+  'Nunito Sans', 'Open Sans', 'Roboto', 'Lato', 'Source Sans Pro', 'Source Sans 3', 'Bahnschrift', 'Tw Cen MT', 'Segoe UI Semibold', 'Inter', 'Noto Sans'];
+async function matchScannedFont(p, a, b, h, opts = {}) {
   try {
     const line = [...(b.lines || [])].sort((l1, l2) => (l2.right - l2.left) - (l1.right - l1.left))[0];
     if (!line || line.text.length < 3) return;
     const cjk = CJK.needs(line.text);
     const all = await PSF.families(), have = new Set(all.map(PSF.famKey));
-    const cands = (cjk ? SCAN_FONTS_CJK : SCAN_FONTS_LATIN).filter(f => have.has(PSF.famKey(f)));
-    if (!cands.length) return;
-    status('Matching the scanned font…');
+    const cands = [...new Set(cjk ? SCAN_FONTS_CJK : [...SCAN_FONTS_LATIN, ...LOOKALIKE_EXTRA])].filter(f => have.has(PSF.famKey(f)));
+    if (!cands.length) return null;
+    status(opts.keepSize ? 'Finding the closest-looking font…' : 'Matching the scanned font…');
     // the scanned line
     const s = h.scale, pad = 2;
     const cx = Math.max(0, Math.floor((line.left - pad) * s)), cy = Math.max(0, Math.floor((line.top - pad) * s));
@@ -1263,15 +1288,17 @@ async function matchScannedFont(p, a, b, h) {
     cctx.drawImage(h.canvas, cx, cy, cw, ch, 0, 0, crop.width, crop.height);
     const bgL = (() => { const c = parseInt(sampleColors(h, { x: line.left, y: line.top, w: line.right - line.left, h: line.bottom - line.top }).bg.slice(1), 16); return 0.299 * (c >> 16) + 0.587 * ((c >> 8) & 255) + 0.114 * (c & 255); })();
     const scan = inkBox(cctx, crop.width, crop.height, bgL);
-    if (scan.x1 < 0) { status('Ready'); return; }
+    if (scan.x1 < 0) { status('Ready'); return null; }
     const sw = scan.x1 - scan.x0 + 1, sh = scan.y1 - scan.y0 + 1;
     const GW = clamp(Math.round(24 * sw / sh), 24, 480), GH = 24;
     const target = sampleBox(scan, GW, GH);
-    let best = null;
+    let best = null; const results = [], tried = new Set();
+    const weights = [...new Set([opts.weight || 400, 400, 700])];
     const R = document.createElement('canvas'), rctx = R.getContext('2d', { willReadFrequently: true });
-    for (const fam of cands) for (const bold of [false, true]) {
-      const e = await PSF.faceOf(fam, bold, false);
-      if (!e || (bold && !e.bold) || (!bold && e.bold)) continue;
+    for (const fam of cands) for (const w of weights) {
+      const e = await PSF.faceOf(fam, w, !!opts.italic);
+      if (!e || Math.abs((e.weight || (e.bold ? 700 : 400)) - w) > 100) continue;
+      const ek = e.file + '#' + e.index; if (tried.has(ek)) continue; tried.add(ek);
       let rec; try { rec = await PSF.load(e); } catch { continue; }
       if (!rec.f.covers(line.text)) continue;
       const px = 64; rctx.font = `${px}px ${rec.css}`; rctx.fontKerning = 'none';
@@ -1285,11 +1312,27 @@ async function matchScannedFont(p, a, b, h) {
       const rw = r.x1 - r.x0 + 1, rh = r.y1 - r.y0 + 1;
       const aspect = Math.abs(Math.log((rw / rh) / (sw / sh)));
       const score = similarity(target, sampleBox(r, GW, GH)) - 1.5 * aspect;
-      if (!best || score > best.score) best = { score, rec, size: px * ((sw / sc / s) / rw) };
+      const cand = { score, rec, size: px * ((sw / sc / s) / rw) };
+      results.push(cand);
+      if (!best || score > best.score) best = cand;
     }
     status('Ready');
-    if (best && best.score > 0.2) applyRealFont(p, a, best.rec, Math.round(best.size * 2) / 2);
-  } catch (e) { console.warn('font matching failed', e); status('Ready'); }
+    results.sort((x, y) => y.score - x.score);
+    diag('look-alike fonts', results.slice(0, 5).map(r => `${r.rec.family} ${r.rec.style} ${r.score.toFixed(2)}`).join(', '));
+    if (opts.suggest) showFontSuggestions(results.filter((r, i, arr) => arr.findIndex(q => q.rec.family === r.rec.family) === i).slice(0, 5).map(r => r.rec.family));
+    if (best && best.score > 0.2) { applyRealFont(p, a, best.rec, opts.keepSize ? null : Math.round(best.size * 2) / 2); return best; }
+    return null;
+  } catch (e) { console.warn('font matching failed', e); status('Ready'); return null; }
+}
+/** Puts the closest-looking fonts at the top of the font list. */
+function showFontSuggestions(fams) {
+  const sel = $('#fontFamily'), cur = sel.value;
+  sel.querySelector('optgroup.suggest')?.remove();
+  if (!fams.length) return;
+  const g = document.createElement('optgroup'); g.className = 'suggest'; g.label = 'Closest look-alikes';
+  for (const f of fams) { const o = document.createElement('option'); o.value = 'fam:' + f; o.textContent = f; o.style.fontFamily = `"${f}"`; g.appendChild(o); }
+  sel.insertBefore(g, sel.querySelector('optgroup.pc') || null);
+  sel.value = cur;
 }
 
 /* -------------------------------------------------------------------- OCR */
@@ -1957,6 +2000,6 @@ window.addEventListener('beforeunload', e => { if (state.dirty) { e.preventDefau
     const files = list.map(f => new File([f.data], f.name, { type: 'application/pdf' }));
     openFiles(files, false);
   });
-  window.__pdfstudio = { state, openFiles, buildPdf, save, setTool, rotatePages, deletePages, setZoom, undo, redo, useSignature, addAnnot, pageByKey, ready: !!pdfjsLib };
+  window.__pdfstudio = { editInfo, state, openFiles, buildPdf, save, setTool, rotatePages, deletePages, setZoom, undo, redo, useSignature, addAnnot, pageByKey, ready: !!pdfjsLib };
 })();
 })();

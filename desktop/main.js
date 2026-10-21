@@ -37,7 +37,7 @@ let fontSvc = null;
 const fromApp = e => win && e.sender === win.webContents;
 ipcMain.handle('fonts:list', e => fromApp(e) ? fontSvc.getList() : []);
 ipcMain.handle('fonts:read', (e, file, index) => fromApp(e) ? fontSvc.read(String(file), Number(index) || 0) : null);
-ipcMain.handle('fonts:download', (e, family, bold, italic) => fromApp(e) ? fontSvc.download(net, String(family), !!bold, !!italic) : null);
+ipcMain.handle('fonts:download', (e, family, weight, italic) => fromApp(e) ? fontSvc.download(net, String(family), typeof weight === 'number' ? weight : !!weight, !!italic) : null);
 
 ipcMain.on('renderer-ready', e => {
   if (!win || e.sender !== win.webContents) return;

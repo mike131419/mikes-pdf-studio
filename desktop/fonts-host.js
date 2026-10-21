@@ -85,10 +85,10 @@ function createFontService(app) {
     if (!r.ok) { const e = new Error('HTTP ' + r.status); e.status = r.status; throw e; }
     return Buffer.from(await r.arrayBuffer());
   }
-  async function download(net, family, bold, italic) {
+  async function download(net, family, weight, italic) {
     family = String(family || '').trim();
     if (!/^[A-Za-z0-9][A-Za-z0-9 ]{0,60}$/.test(family)) throw new Error('Unusual font name');
-    const wght = bold ? 700 : 400, ital = italic ? 1 : 0;
+    const wght = typeof weight === 'number' ? Math.min(900, Math.max(100, Math.round(weight / 100) * 100)) : (weight ? 700 : 400), ital = italic ? 1 : 0;
     const q = `${GF}/css2?family=${encodeURIComponent(family).replace(/%20/g, '+')}:ital,wght@${ital},${wght}`;
     let css = null, lastErr;
     for (const ua of UAS) {
@@ -108,7 +108,8 @@ function createFontService(app) {
     let faces;
     try { faces = Sfnt.describe(new Uint8Array(data)); } catch { throw new Error('Downloaded file is not a font'); }
     const face = faces[0];
-    const style = [bold ? 'Bold' : '', italic ? 'Italic' : ''].join('') || 'Regular';
+    const WN = { 100: 'Thin', 200: 'ExtraLight', 300: 'Light', 400: '', 500: 'Medium', 600: 'SemiBold', 700: 'Bold', 800: 'ExtraBold', 900: 'Black' };
+    const style = (WN[wght] || '') + (italic ? 'Italic' : '') || 'Regular';
     const fileName = `${family.replace(/\s+/g, '')}-${style}${/\.otf/i.test(url) ? '.otf' : '.ttf'}`;
     const dir = installDir(app);
     fs.mkdirSync(dir, { recursive: true });

@@ -9,6 +9,6 @@ contextBridge.exposeInMainWorld('pdfStudioHost', {
   fonts: {
     list: () => ipcRenderer.invoke('fonts:list'),
     read: (file, index) => ipcRenderer.invoke('fonts:read', file, index),
-    download: (family, bold, italic) => ipcRenderer.invoke('fonts:download', family, bold, italic),
+    download: (family, weight, italic) => ipcRenderer.invoke('fonts:download', family, weight, italic),
   },
 });
