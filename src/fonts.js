@@ -16,8 +16,10 @@ window.PDFStudioFonts = (() => {
     arialnarrow: ['Liberation Sans Narrow', 'Arimo'], symbol: [], zapfdingbats: [],
   };
 
+  const STYLE_WORDS = /\s+(thin|hairline|extra\s?light|ultra\s?light|light|regular|normal|book|medium|semi\s?bold|demi\s?bold|bold|extra\s?bold|ultra\s?bold|black|heavy|italic|oblique)$/i;
+  function baseFamily(fam) { let b = String(fam || ''), prev; do { prev = b; b = b.replace(STYLE_WORDS, ''); } while (b !== prev && b.length > 2); return b.length > 1 ? b : fam; }
   function list() {
-    if (!listP) listP = host ? host.list().then(l => Array.isArray(l) ? l : []).catch(() => []) : Promise.resolve([]);
+    if (!listP) listP = host ? host.list().then(l => (Array.isArray(l) ? l : []).map(e => ({ ...e, base: baseFamily(e.family) }))).catch(() => []) : Promise.resolve([]);
     return listP;
   }
   function refreshList() { listP = null; return list(); }
@@ -33,7 +35,7 @@ window.PDFStudioFonts = (() => {
       const css = `PSF${++n}`;
       const face = new FontFace(css, bytes.slice().buffer);
       await face.load(); document.fonts.add(face);
-      const rec = { key, f, css: `"${css}"`, asc: f.asc / f.upm, desc: f.desc / f.upm, family: entry.family, style: entry.style,
+      const rec = { key, f, css: `"${css}"`, asc: f.asc / f.upm, desc: f.desc / f.upm, family: baseFamily(entry.family), style: entry.style,
         bold: !!entry.bold, italic: !!entry.italic, label: entry.full || `${entry.family} ${entry.style}`, ps: entry.ps };
       loaded.set(key, rec);
       return rec;
@@ -50,19 +52,33 @@ window.PDFStudioFonts = (() => {
   /** Best face of a family for the wanted weight (or bold flag) and italic (null if the family isn't installed). */
   async function faceOf(family, weight, italic) {
     const fk = famKey(family), all = await list(), W = wantW(weight);
-    const faces = all.filter(e => famKey(e.family) === fk || famKey(e.family1) === fk);
+    const faces = all.filter(e => famKey(e.family) === fk || famKey(e.family1) === fk || famKey(e.base) === fk);
     if (!faces.length) return null;
     const score = e => Math.abs((e.weight || (e.bold ? 700 : 400)) - W) / 100 + (!!e.italic === !!italic ? 0 : 3)
       + (/condensed|narrow|expanded|wide/i.test(e.style) ? 2 : 0);
     return faces.sort((a, b) => score(a) - score(b))[0];
   }
   const styleOk = (x, weight, italic) => x && Math.abs((x.weight || (x.bold ? 700 : 400)) - wantW(weight)) <= 100 && !!x.italic === !!italic;
-  async function tryDownload(family, weight, italic) {
+  async function tryDownload(family, weight, italic, opts = {}) {
     if (!host || !host.download) return null;
     const W = wantW(weight), k = `${famKey(family)}|${W}|${!!italic}`;
     if (!dlTried.has(k)) dlTried.set(k, host.download(family, W, !!italic).then(e => { console.log('[diag] font download', family, W, italic ? 'italic' : '', e ? 'ok ' + e.file : 'not available'); if (e) refreshList(); return e || null; }).catch(err => { console.warn('font download failed', family, err && err.message); return null; }));
     const e = await dlTried.get(k);
-    return e ? (await faceOf(family, W, italic)) || e : null;
+    if (e && !opts.companion) downloadCompanions(family, W, italic);
+    return e ? { ...e, weight: W, italic: !!italic, bold: W >= 600 } : null; // exactly the file that was downloaded
+  }
+  // After a font is downloaded, also get its regular, bold and italic versions so B / I keep the same font
+  const companionsDone = new Set();
+  function downloadCompanions(family, W, italic) {
+    const fk = famKey(family); if (companionsDone.has(fk)) return; companionsDone.add(fk);
+    (async () => {
+      for (const [w, it] of [[400, false], [700, false], [400, true], [700, true], [W, !italic]]) {
+        if (w === W && it === !!italic) continue;
+        const have = await faceOf(family, w, it);
+        if (have && Math.abs((have.weight || 400) - w) <= 50 && !!have.italic === it) continue;
+        await tryDownload(family, w, it, { companion: true });
+      }
+    })().catch(() => {});
   }
   const splitCamel = s => s.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2');
 
@@ -131,7 +147,7 @@ window.PDFStudioFonts = (() => {
   }
   async function families() {
     const all = await list(), seen = new Map();
-    for (const e of all) if (e.family && !seen.has(famKey(e.family))) seen.set(famKey(e.family), e.family);
+    for (const e of all) { const fam = e.base || e.family; if (fam && !seen.has(famKey(fam))) seen.set(famKey(fam), fam); }
     return [...seen.values()].sort((a, b) => a.localeCompare(b));
   }
   function refresh() { dlTried.clear(); return refreshList(); }

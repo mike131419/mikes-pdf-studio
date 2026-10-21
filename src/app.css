@@ -120,8 +120,6 @@ body[data-tool=whiteout] .page,body[data-tool=highlight] .page{cursor:crosshair}
 .annot .del svg{width:12px;height:12px;stroke-width:2.4}
 .annot .del:hover{background:#fdecea;color:var(--accent2)}
 .annot.sel .rs,.annot.sel .del{display:flex}
-.annot-text:not(.wrap) .rs{display:none!important}
-.annot-text.wrap .rs{cursor:ew-resize;top:50%;bottom:auto;right:-7px;margin-top:-6px}
 .annot-text.editing .tbody{white-space:pre-wrap}
 .drawing{position:absolute;border:1px dashed #555;pointer-events:none}
 
@@ -200,3 +198,15 @@ body.dragover #dropShade{display:flex}
 .fpbtns{display:flex;gap:6px;margin-top:10px;flex-wrap:wrap}
 .fpbtns button{border-color:var(--line);background:var(--panel2)}
 body.organize .fontpanel{display:none}
+
+/* handles: move grip (text), rotate (pictures) */
+.annot .mv,.annot .rot{position:absolute;display:none;width:22px;height:22px;align-items:center;justify-content:center;background:#fff;border:1.5px solid var(--sel);border-radius:50%;color:var(--sel);box-shadow:0 1px 3px rgba(0,0,0,.2)}
+.annot .mv{left:-28px;top:-4px;cursor:move}
+.annot .rot{left:50%;top:-34px;margin-left:-11px;cursor:grab}
+.annot .mv svg,.annot .rot svg{width:13px;height:13px;stroke-width:2.2}
+.annot.sel .mv,.annot.sel .rot,.annot-text.editing .mv{display:flex}
+.annot-text .rs{display:flex!important;cursor:ew-resize;top:50%;bottom:auto;right:-7px;margin-top:-6px}
+.annot-text:not(.sel):not(.editing) .rs{display:none!important}
+.annot-text.editing .rs{display:flex!important}
+.annot-image{transform-origin:center center}
+#placeGhost{position:fixed;display:none;pointer-events:none;opacity:.6;z-index:30;filter:drop-shadow(0 1px 2px rgba(0,0,0,.25))}

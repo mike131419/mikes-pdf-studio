@@ -331,7 +331,11 @@ function drawAnnotsOnCanvas(ctx, p, s) {
       ctx.save(); ctx.globalAlpha = a.opacity; if (a.kind === 'highlight') ctx.globalCompositeOperation = 'multiply';
       ctx.fillStyle = a.color; ctx.fillRect(a.x * s, a.y * s, a.w * s, a.h * s); ctx.restore();
     } else if (a.type === 'image') {
-      const im = imgEl(a.imgId); if (im.complete) ctx.drawImage(im, a.x * s, a.y * s, a.w * s, a.h * s);
+      const im = imgEl(a.imgId);
+      if (im.complete) {
+        ctx.save(); ctx.translate((a.x + a.w / 2) * s, (a.y + a.h / 2) * s); if (a.rot) ctx.rotate(a.rot * Math.PI / 180);
+        ctx.drawImage(im, -a.w / 2 * s, -a.h / 2 * s, a.w * s, a.h * s); ctx.restore();
+      }
     } else if (a.type === 'text') {
       ctx.fillStyle = a.color; ctx.font = cssFont(a, a.size * s); ctx.fontKerning = 'none';
       const bl = baselineOf(a), lh = lhOf(a);
@@ -425,6 +429,7 @@ function rotatePages(delta) {
       const cx = a.x + w / 2, cy = a.y + h / 2;
       const [nx, ny] = delta > 0 ? [H - cy, cx] : [cy, W - cx];
       a.x = nx - w / 2; a.y = ny - h / 2;
+      if (a.type === 'image') a.rot = (((a.rot || 0) + delta) % 360 + 540) % 360 - 180;
       if (a.cover) { // the hidden original turns with the page
         const c = a.cover, ccx = c.x + c.w / 2, ccy = c.y + c.h / 2;
         const [mx, my] = delta > 0 ? [H - ccy, ccx] : [ccy, W - ccx];
@@ -559,7 +564,7 @@ function styleTextBody(b, a) {
   Object.assign(b.style, {
     fontFamily: fontOf(a).css, fontSize: a.size * z() + 'px', lineHeight: String(lhOf(a)), color: a.color,
     fontWeight: !plain && a.bold ? 'bold' : 'normal', fontStyle: !plain && a.italic ? 'italic' : 'normal',
-    width: a.w ? a.w * z() + 'px' : '',
+    width: '', maxWidth: a.w ? a.w * z() + 'px' : '',
   });
   if (plain && !CJK.loaded) CJK.load().then(() => { relayout(a); const p = state.pages.find(q => q.annots.includes(a)); if (p && !editing) renderAnnots(p); })
     .catch(e => toast('Chinese font failed to load: ' + e.message, true));
@@ -570,7 +575,10 @@ const z = () => state.zoom;
 function placeEl(el, a) {
   el.style.left = a.x * z() + 'px'; el.style.top = a.y * z() + 'px';
   if (a.type !== 'text') { el.style.width = a.w * z() + 'px'; el.style.height = a.h * z() + 'px'; }
+  el.style.transform = a.rot ? `rotate(${a.rot}deg)` : '';
 }
+const ROT_SVG = '<svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.6"/><path d="M20 4v4h-4"/></svg>';
+const MOVE_SVG = '<svg viewBox="0 0 24 24"><path d="M12 3v18M3 12h18M12 3l-3 3M12 3l3 3M12 21l-3-3M12 21l3-3M3 12l3-3M3 12l3 3M21 12l-3-3M21 12l-3 3"/></svg>';
 const DEL_SVG = '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg>';
 function makeAnnotEl(a) {
   const el = document.createElement('div');
@@ -584,7 +592,9 @@ function makeAnnotEl(a) {
     el.appendChild(b);
     if (a.w) el.classList.add('wrap');
   }
-  el.insertAdjacentHTML('beforeend', `<button class="del" title="Delete (Del)">${DEL_SVG}</button><div class="rs" title="${a.type === 'text' ? 'Drag to change the box width' : 'Resize'}"></div>`);
+  el.insertAdjacentHTML('beforeend', `<button class="del" title="Delete (Del)">${DEL_SVG}</button><div class="rs" title="${a.type === 'text' ? 'Drag to change the box width' : 'Resize'}"></div>`
+    + (a.type === 'text' ? `<div class="mv" title="Drag to move">${MOVE_SVG}</div>` : '')
+    + (a.type === 'image' ? `<div class="rot" title="Drag to rotate (hold Shift for 15° steps)">${ROT_SVG}</div>` : ''));
   placeEl(el, a);
   if (state.selAnnot && state.selAnnot.id === a.id) el.classList.add('sel');
   return el;
@@ -713,12 +723,16 @@ view.addEventListener('pointerdown', e => {
   if (annotDom) {
     const id = annotDom.dataset.id, { a } = findAnnot(key, id);
     if (e.target.closest('.del')) { e.preventDefault(); commitEditing(); deleteAnnot(key, id); return; }
-    if (editing && editing.id === id) return; // let the caret work
+    const handle = e.target.closest('.rs') ? 'resize' : e.target.closest('.rot') ? 'rotate' : e.target.closest('.mv') ? 'move' : null;
+    if (!handle && editing && editing.id === id) return; // let the caret work
+    const wasEditingThis = !!(editing && editing.id === id);
+    if (handle && wasEditingThis) a.touched = true; // moving/resizing a just-opened paragraph is a real change: keep it
     commitEditing();
     selectAnnot(key, id);
     e.preventDefault();
-    const resize = !!e.target.closest('.rs');
-    drag = { mode: resize ? 'resize' : 'move', key, a, el: annotDom, start: pt, orig: { ...a }, W, H, moved: false, snap: snapshot() };
+    const el = view.querySelector(`.page[data-key="${key}"] .annot[data-id="${id}"]`) || annotDom;
+    drag = { mode: handle || 'move', key, a, el, start: pt, orig: { ...a, w: a.w || (a.type === 'text' ? el.offsetWidth / z() : a.w) }, W, H, moved: false, snap: snapshot(),
+      client: { x: e.clientX, y: e.clientY }, resumeEdit: wasEditingThis, clickToEdit: handle !== 'rotate' && a.type === 'text' && (state.tool === 'edit' || state.tool === 'text') };
     view.setPointerCapture(e.pointerId);
     return;
   }
@@ -727,7 +741,11 @@ view.addEventListener('pointerdown', e => {
   const block = e.target.closest('.eblock');
   if (block && state.tool === 'edit') {
     e.preventDefault(); commitEditing(); selectAnnot(null);
-    convertBlock(p, block.dataset.id, { x: e.clientX, y: e.clientY });
+    const before = snapshot();
+    const d = { mode: 'block', key, start: pt, W, H, moved: false, before, client: { x: e.clientX, y: e.clientY }, res: null };
+    d.conv = convertBlock(p, block.dataset.id, null, { noEdit: true }).then(res => { d.res = res; return res; });
+    drag = d;
+    view.setPointerCapture(e.pointerId);
     return;
   }
 
@@ -754,14 +772,13 @@ view.addEventListener('pointerdown', e => {
     const kind = state.tool;
     if (!state.pendingImg) { openSigModal(kind); return; }
     const im = state.images.get(state.pendingImg);
-    const maxW = kind === 'stamp' ? 140 : 170, maxH = kind === 'stamp' ? 110 : 80;
-    let w = Math.min(maxW, W * 0.4), h = w * im.h / im.w;
-    if (h > maxH) { h = maxH; w = h * im.w / im.h; }
+    const { w, h } = placeSize(kind, im, W);
+    ghost.style.display = 'none';
     pushUndo();
     const a = { id: newId(), type: 'image', kind, imgId: state.pendingImg, w, h, x: clamp(pt.x - w / 2, 0, W - w), y: clamp(pt.y - h / 2, 0, H - h) };
     addAnnot(p, a);
     setTool('select');
-    status(`${kind === 'stamp' ? 'Stamp' : 'Signature'} placed. Drag to move it, drag the corner to resize.`);
+    status(`${kind === 'stamp' ? 'Stamp' : 'Signature'} placed. Drag to move it, drag the corner to resize, drag the round handle to rotate.`);
   }
 });
 view.addEventListener('pointermove', e => {
@@ -770,8 +787,14 @@ view.addEventListener('pointermove', e => {
   const lr = pageEl.getBoundingClientRect();
   const pt = { x: clamp((e.clientX - lr.left) / z(), 0, drag.W), y: clamp((e.clientY - lr.top) / z(), 0, drag.H) };
   const dx = pt.x - drag.start.x, dy = pt.y - drag.start.y;
-  if (!drag.moved && Math.hypot(dx, dy) * z() < 2) return;
+  if (!drag.moved && Math.hypot(dx, dy) * z() < 3) return;
   drag.moved = true;
+  if (drag.mode === 'block') { // dragging an original paragraph/picture: move its editable copy once it exists
+    if (!drag.res) return;
+    const a = drag.res.a, el = view.querySelector(`.page[data-key="${drag.key}"] .annot[data-id="${a.id}"]`);
+    if (!el) return;
+    Object.assign(drag, { mode: 'move', a, el, orig: { ...a }, snap: drag.before, fromBlock: true });
+  }
   if (drag.mode === 'draw') {
     const x = Math.min(pt.x, drag.start.x), y = Math.min(pt.y, drag.start.y);
     Object.assign(drag.box.style, { left: x * z() + 'px', top: y * z() + 'px', width: Math.abs(dx) * z() + 'px', height: Math.abs(dy) * z() + 'px',
@@ -779,23 +802,46 @@ view.addEventListener('pointermove', e => {
     return;
   }
   const a = drag.a, o = drag.orig;
+  if (drag.mode === 'rotate') {
+    const cx = o.x + o.w / 2, cy = o.y + o.h / 2;
+    const ang = p2 => Math.atan2(p2.y - cy, p2.x - cx) * 180 / Math.PI;
+    let r = (o.rot || 0) + ang(pt) - ang(drag.start);
+    r = e.shiftKey ? Math.round(r / 15) * 15 : (Math.abs(r - Math.round(r / 90) * 90) < 4 ? Math.round(r / 90) * 90 : r);
+    a.rot = ((r % 360) + 360) % 360; if (a.rot > 180) a.rot -= 360;
+    placeEl(drag.el, a);
+    return;
+  }
   if (drag.mode === 'move') {
     const w = a.type === 'text' ? drag.el.offsetWidth / z() : a.w, h = a.type === 'text' ? drag.el.offsetHeight / z() : a.h;
     a.x = clamp(o.x + dx, -w * 0.5, drag.W - w * 0.5); a.y = clamp(o.y + dy, -h * 0.5, drag.H - h * 0.5);
   } else if (a.type === 'text') { // change wrap width
     a.w = Math.max(a.size * 2, o.w + dx);
     const b = drag.el.querySelector('.tbody');
-    b.style.width = a.w * z() + 'px'; b.textContent = layoutLines(a).join('\n');
+    b.style.width = a.w * z() + 'px'; b.style.maxWidth = ''; if (!editing || editing.id !== a.id) b.textContent = layoutLines(a).join('\n');
   } else {
-    let w = Math.max(8, o.w + dx), h = Math.max(6, o.h + dy);
+    const t = (o.rot || 0) * Math.PI / 180; // resize along the item's own (rotated) sides
+    const lx = dx * Math.cos(t) + dy * Math.sin(t), ly = -dx * Math.sin(t) + dy * Math.cos(t);
+    let w = Math.max(8, o.w + lx), h = Math.max(6, o.h + ly);
     if (a.type === 'image' && !e.shiftKey) { const r = o.w / o.h; if (w / h > r) h = w / r; else w = h * r; }
-    a.w = w; a.h = h;
+    // keep the opposite corner in place for rotated items
+    const ocx = o.x + o.w / 2, ocy = o.y + o.h / 2, ax = -o.w / 2, ay = -o.h / 2;
+    const fx = ocx + ax * Math.cos(t) - ay * Math.sin(t), fy = ocy + ax * Math.sin(t) + ay * Math.cos(t);
+    const ncx = fx + (w / 2) * Math.cos(t) - (h / 2) * Math.sin(t), ncy = fy + (w / 2) * Math.sin(t) + (h / 2) * Math.cos(t);
+    a.w = w; a.h = h; a.x = ncx - w / 2; a.y = ncy - h / 2;
   }
   placeEl(drag.el, a);
 });
 function endDrag() {
   if (!drag) return;
   const d = drag; drag = null;
+  if (d.mode === 'block') { // a click (no drag) on an original paragraph: start typing in it
+    d.conv.then(res => {
+      if (!res) return;
+      if (res.a.type === 'text') startEditing(d.key, res.a.id, false, { before: d.before, fromBlockNew: true, caretAt: d.client });
+      else status('Picture: drag to move, drag the corner to resize, drag the round handle to rotate, Delete to remove it.');
+    });
+    return;
+  }
   if (d.mode === 'draw') {
     const r = d.box.style; d.box.remove();
     if (!d.moved) return;
@@ -806,12 +852,33 @@ function endDrag() {
     return;
   }
   if (d.moved) {
-    if (d.mode === 'move') d.a.moved = true;
+    if (d.mode === 'move') { d.a.moved = true; d.a.touched = true; }
     pushUndo(d.snap); setDirty(); refreshThumbSoon(d.key);
     if (d.a.type === 'text' && d.mode === 'resize') { d.a.touched = true; relayout(d.a); renderAnnots(pageByKey(d.key)); selectAnnot(d.key, d.a.id); }
+    if (d.resumeEdit) startEditing(d.key, d.a.id, false);
+  } else if (d.clickToEdit || d.resumeEdit) {
+    startEditing(d.key, d.a.id, false, { caretAt: d.client }); // click on a text box (Edit/Text tool): type in it again
   }
 }
 view.addEventListener('pointerup', endDrag);
+// While placing a signature or stamp, a see-through copy follows the mouse
+const ghost = document.createElement('img'); ghost.id = 'placeGhost'; ghost.alt = ''; document.body.appendChild(ghost);
+function placeSize(kind, im, W) {
+  const maxW = kind === 'stamp' ? 140 : 170, maxH = kind === 'stamp' ? 110 : 80;
+  let w = Math.min(maxW, W * 0.4), h = w * im.h / im.w;
+  if (h > maxH) { h = maxH; w = h * im.w / im.h; }
+  return { w, h };
+}
+view.addEventListener('pointermove', e => {
+  const on = (state.tool === 'sign' || state.tool === 'stamp') && state.pendingImg && !drag;
+  const pageEl = on && e.target.closest('.page');
+  if (!pageEl) { ghost.style.display = 'none'; return; }
+  const im = state.images.get(state.pendingImg), p = pageByKey(pageEl.dataset.key);
+  const { w, h } = placeSize(state.tool, im, dispDims(p).W);
+  if (ghost.dataset.src !== state.pendingImg) { ghost.src = im.dataUrl; ghost.dataset.src = state.pendingImg; }
+  Object.assign(ghost.style, { display: 'block', width: w * z() + 'px', height: h * z() + 'px', left: e.clientX - w * z() / 2 + 'px', top: e.clientY - h * z() / 2 + 'px' });
+});
+view.addEventListener('pointerleave', () => { ghost.style.display = 'none'; });
 view.addEventListener('pointercancel', endDrag);
 view.addEventListener('dblclick', e => {
   const an = e.target.closest('.annot-text'); if (!an) return;
@@ -827,6 +894,7 @@ view.addEventListener('input', e => {
 /* --------------------------------------------------------------- tools */
 function setTool(t) {
   commitEditing();
+  if (typeof ghost !== 'undefined') ghost.style.display = 'none';
   const prev = state.tool;
   state.tool = t;
   document.body.dataset.tool = t;
@@ -1156,8 +1224,8 @@ function renderEditLayer(p, el = pageElOf(p)) {
     L.insertAdjacentHTML('beforeend', '<div class="ocrbar subtle"><span>No editable text or pictures found on this page.</span></div>');
   }
 }
-async function convertBlock(p, blockId, caretAt) {
-  const info = editInfo.get(editKeyOf(p)); const b = info?.blocks.find(x => x.id === blockId); if (!b) return;
+async function convertBlock(p, blockId, caretAt, opts = {}) {
+  const info = editInfo.get(editKeyOf(p)); const b = info?.blocks.find(x => x.id === blockId); if (!b) return null;
   const h = await hiresRender(p);
   const col = sampleColors(h, b);
   if (b.kind === 'text') {
@@ -1173,19 +1241,21 @@ async function convertBlock(p, blockId, caretAt) {
     const before = snapshot();
     p.annots.push(a);
     renderAnnots(p); selectAnnot(p.key, a.id);
-    startEditing(p.key, a.id, false, { before, fromBlockNew: true, caretAt });
+    if (!opts.noEdit) startEditing(p.key, a.id, false, { before, fromBlockNew: true, caretAt });
     if (PSF.available) {
       if (b.pdfFont) findOriginalFont(p, a, b.pdfFont, b, h);
       else if (/^o/.test(b.id)) matchScannedFont(p, a, b, h, { suggest: true });
     }
+    return { a };
   } else {
     const s = h.scale, c = document.createElement('canvas');
     c.width = Math.max(1, Math.round(b.w * s)); c.height = Math.max(1, Math.round(b.h * s));
     c.getContext('2d').drawImage(h.canvas, b.x * s, b.y * s, b.w * s, b.h * s, 0, 0, c.width, c.height);
     const imgId = registerImage(c.toDataURL('image/png'), c.width, c.height);
     pushUndo();
-    addAnnot(p, { id: newId(), type: 'image', imgId, x: b.x, y: b.y, w: b.w, h: b.h, fromBlock: b.id, cover: { x: b.x - 0.5, y: b.y - 0.5, w: b.w + 1, h: b.h + 1, color: col.bg } });
-    status('Picture: drag to move, drag the corner to resize, Delete to remove it.');
+    const a = { id: newId(), type: 'image', imgId, x: b.x, y: b.y, w: b.w, h: b.h, fromBlock: b.id, cover: { x: b.x - 0.5, y: b.y - 0.5, w: b.w + 1, h: b.h + 1, color: col.bg } };
+    addAnnot(p, a);
+    return { a };
   }
 }
 
@@ -1896,8 +1966,10 @@ async function buildPdf(pageList) {
         } else if (a.type === 'image') {
           let img = embedded.get(a.imgId);
           if (!img) { img = await out.embedPng(state.images.get(a.imgId).dataUrl); embedded.set(a.imgId, img); }
-          const [x, y] = toPdf(a.x, a.y + a.h);
-          cp.drawImage(img, { x, y, width: a.w, height: a.h, rotate: degrees(r) });
+          // rotate the picture's lower-left corner around its centre, then draw with the same rotation
+          const t = (a.rot || 0) * Math.PI / 180, cx = a.x + a.w / 2, cy = a.y + a.h / 2, ox = -a.w / 2, oy = a.h / 2;
+          const [x, y] = toPdf(cx + ox * Math.cos(t) - oy * Math.sin(t), cy + ox * Math.sin(t) + oy * Math.cos(t));
+          cp.drawImage(img, { x, y, width: a.w, height: a.h, rotate: degrees(r - (a.rot || 0)) });
         } else if (a.type === 'text') {
           const bl = baselineOf(a), lh = lhOf(a), glyphLines = cjkLines.get(a), real = realLines.get(a);
           const font = glyphLines || real ? null : await fontFor(a);
