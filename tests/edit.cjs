@@ -114,6 +114,7 @@ const { execFileSync } = require('child_process'); const fs = require('fs');
   await page.waitForTimeout(800);
   await page.locator('.modalcard').screenshot({ path: 'C2-chop.png' });
   await page.click('#sigUse');
+  await page.waitForFunction(() => document.getElementById('sigModal').classList.contains('hidden'));
   console.log('before chop', await page.evaluate(() => [window.__pdfstudio.state.tool, window.__pdfstudio.state.pendingImg, document.getElementById('sigModal').className].join('|')));
   console.log('hit', await page.evaluate(([x,y]) => document.elementFromPoint(x,y)?.className, [pg.x+150, pg.y+pg.height-200]));
   await page.mouse.click(pg.x + 150, pg.y + pg.height - 200);
