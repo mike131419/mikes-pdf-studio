@@ -134,5 +134,6 @@ window.PDFStudioFonts = (() => {
     for (const e of all) if (e.family && !seen.has(famKey(e.family))) seen.set(famKey(e.family), e.family);
     return [...seen.values()].sort((a, b) => a.localeCompare(b));
   }
-  return { available: !!host, list, load, get, resolvePdfFont, resolveFamily, faceOf, families, famKey, parseName, tryDownload };
+  function refresh() { dlTried.clear(); return refreshList(); }
+  return { available: !!host, list, load, get, resolvePdfFont, resolveFamily, faceOf, families, famKey, parseName, tryDownload, refresh };
 })();

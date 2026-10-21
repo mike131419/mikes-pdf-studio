@@ -44,6 +44,13 @@ ipcMain.on('renderer-ready', e => {
   pageReady = true; const p = pending; pending = []; sendFiles(p);
 });
 
+function appLog(line) {
+  try {
+    const logFile = path.join(app.getPath('userData'), 'logs', 'app.log');
+    fs.mkdirSync(path.dirname(logFile), { recursive: true });
+    fs.appendFileSync(logFile, `${new Date().toISOString()} ${line}\n`);
+  } catch {}
+}
 function createWindow() {
   win = new BrowserWindow({
     width: 1400, height: 900, title: "Mike's PDF Studio", autoHideMenuBar: true, show: false,
@@ -55,7 +62,7 @@ function createWindow() {
   // Diagnostics: the editor's messages go to %APPDATA%\Mike's PDF Studio\logs\app.log (kept small)
   const logFile = path.join(app.getPath('userData'), 'logs', 'app.log');
   try { fs.mkdirSync(path.dirname(logFile), { recursive: true }); if (fs.existsSync(logFile) && fs.statSync(logFile).size > 2e6) fs.renameSync(logFile, logFile + '.old'); } catch {}
-  const log = line => { try { fs.appendFileSync(logFile, `${new Date().toISOString()} ${line}\n`); } catch {} };
+  const log = appLog;
   log(`--- start v${app.getVersion()} ${process.platform} ${process.arch}`);
   win.webContents.on('console-message', (e, level, message, line, source) => {
     if (level >= 2 || /^\[diag\]/.test(message)) log(`[${['debug', 'info', 'warn', 'error'][level] || level}] ${String(message).slice(0, 2000)}${level >= 3 ? ` (${path.basename(String(source || ''))}:${line})` : ''}`);
@@ -76,7 +83,7 @@ app.on('second-instance', (e, argv, cwd) => {
   if (win) { if (win.isMinimized()) win.restore(); win.focus(); }
   sendFiles(pdfsFromArgs(argv, cwd));
 });
-app.whenReady().then(() => { fontSvc = createFontService(app); createWindow(); pending.push(...pdfsFromArgs(process.argv)); setupAutoUpdate(); });
+app.whenReady().then(() => { fontSvc = createFontService(app, line => appLog(line)); createWindow(); pending.push(...pdfsFromArgs(process.argv)); setupAutoUpdate(); });
 
 // Automatic updates from GitHub Releases (only in the installed app made by the Setup.exe).
 function setupAutoUpdate() {

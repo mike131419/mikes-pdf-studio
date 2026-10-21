@@ -4,6 +4,7 @@
 const fs = require('fs');
 const path = require('path');
 const { execFile } = require('child_process');
+const zlib = require('zlib');
 const Sfnt = require('./sfnt.js');
 
 const FONT_EXT = /\.(ttf|otf|ttc)$/i;
@@ -35,7 +36,7 @@ function walk(dir, out, depth = 0) {
   }
 }
 
-function createFontService(app) {
+function createFontService(app, log = () => {}) {
   const cacheFile = path.join(app.getPath('userData'), 'font-list.json');
   let list = null, listing = null;
   const allowed = new Set();
@@ -76,45 +77,75 @@ function createFontService(app) {
     return Sfnt.extractFace(b, index | 0);
   }
 
-  /* ---- Google Fonts download ---- */
+  /* ---- Free font download ----
+     1) Google Fonts CSS APIs, asking for plain TrueType files (old-browser user agents)
+     2) Fontsource on jsDelivr (the same Google Fonts, as static WOFF files per weight), converted to TrueType here */
   const GF = process.env.PDFSTUDIO_GFONTS_URL || 'https://fonts.googleapis.com';
-  // An old-browser user agent makes Google Fonts serve plain TrueType files (needed for PDF embedding).
-  const UAS = ['Mozilla/4.0 (compatible; MSIE 8.0; Windows NT 6.1)', 'Wget/1.21', 'curl/8.0'];
+  const FSRC = process.env.PDFSTUDIO_FONTSOURCE_URL || 'https://cdn.jsdelivr.net/npm';
+  const UAS = ['Mozilla/4.0 (compatible; MSIE 8.0; Windows NT 6.1)', 'Wget/1.21', 'curl/8.0', ''];
+  const WN = { 100: 'Thin', 200: 'ExtraLight', 300: 'Light', 400: '', 500: 'Medium', 600: 'SemiBold', 700: 'Bold', 800: 'ExtraBold', 900: 'Black' };
   async function fetchBuf(net, url, ua) {
     const r = await net.fetch(url, { headers: ua ? { 'User-Agent': ua } : {} });
     if (!r.ok) { const e = new Error('HTTP ' + r.status); e.status = r.status; throw e; }
     return Buffer.from(await r.arrayBuffer());
   }
+  /** WOFF 1.0 -> TrueType/OpenType (tables are zlib-compressed one by one). */
+  function woffToSfnt(buf) {
+    if (buf.toString('latin1', 0, 4) !== 'wOFF') return null;
+    const flavor = buf.readUInt32BE(4), n = buf.readUInt16BE(12), tables = {};
+    for (let i = 0; i < n; i++) {
+      const o = 44 + i * 20, tag = buf.toString('latin1', o, o + 4);
+      const off = buf.readUInt32BE(o + 4), comp = buf.readUInt32BE(o + 8), orig = buf.readUInt32BE(o + 12);
+      const raw = buf.subarray(off, off + comp);
+      tables[tag] = new Uint8Array(comp < orig ? zlib.inflateSync(raw) : raw);
+    }
+    return Buffer.from(Sfnt.writeFont(tables, flavor));
+  }
+  const isFont = b => b && b.length > 12 && [0x00010000, 0x4f54544f, 0x74727565].includes(b.readUInt32BE(0));
+  async function fromGoogleCss(net, family, wght, ital, notes) {
+    const fam = encodeURIComponent(family).replace(/%20/g, '+');
+    const queries = [`${GF}/css2?family=${fam}:ital,wght@${ital},${wght}`, `${GF}/css?family=${fam}:${wght}${ital ? 'italic' : ''}`];
+    for (const q of queries) for (const ua of UAS) {
+      let css;
+      try { css = (await fetchBuf(net, q, ua)).toString('utf8'); }
+      catch (e) { notes.push(`${q.includes('css2') ? 'css2' : 'css'} ${e.message}`); if (e.status === 400 || e.status === 404) break; continue; }
+      const blocks = css.split('@font-face').filter(b => /url\(/.test(b));
+      const pick = blocks.find(b => /\/\*\s*latin\s*\*\//.test(b) && /\.(ttf|otf)\)/.test(b)) || blocks.reverse().find(b => /\.(ttf|otf)\)/.test(b));
+      const m = pick && pick.match(/url\(([^)]+?\.(?:ttf|otf))\)/);
+      if (!m) { notes.push(`${q.includes('css2') ? 'css2' : 'css'} ua#${UAS.indexOf(ua)}: no TrueType (${(css.match(/format\('([^']+)'\)/) || [])[1] || 'none'})`); continue; }
+      const data = await fetchBuf(net, m[1].replace(/['"]/g, ''));
+      if (isFont(data)) return { data, ext: /\.otf/i.test(m[1]) ? '.otf' : '.ttf', src: 'google' };
+    }
+    return null;
+  }
+  async function fromFontsource(net, family, wght, ital, notes) {
+    const slug = family.toLowerCase().replace(/\s+/g, '-');
+    const url = `${FSRC}/@fontsource/${slug}@5/files/${slug}-latin-${wght}-${ital ? 'italic' : 'normal'}.woff`;
+    try {
+      const data = woffToSfnt(await fetchBuf(net, url));
+      if (isFont(data)) return { data, ext: '.ttf', src: 'fontsource' };
+      notes.push('fontsource: not a WOFF file');
+    } catch (e) { notes.push(`fontsource ${e.message}`); }
+    return null;
+  }
   async function download(net, family, weight, italic) {
     family = String(family || '').trim();
     if (!/^[A-Za-z0-9][A-Za-z0-9 ]{0,60}$/.test(family)) throw new Error('Unusual font name');
     const wght = typeof weight === 'number' ? Math.min(900, Math.max(100, Math.round(weight / 100) * 100)) : (weight ? 700 : 400), ital = italic ? 1 : 0;
-    const q = `${GF}/css2?family=${encodeURIComponent(family).replace(/%20/g, '+')}:ital,wght@${ital},${wght}`;
-    let css = null, lastErr;
-    for (const ua of UAS) {
-      try {
-        css = (await fetchBuf(net, q, ua)).toString('utf8');
-        if (/format\('(truetype|opentype)'\)|\.ttf\)|\.otf\)/.test(css)) break;
-      } catch (e) { lastErr = e; if (e.status === 400 || e.status === 404) return null; }
-    }
-    if (!css) { if (lastErr) throw lastErr; return null; }
-    const urls = [...css.matchAll(/url\(([^)]+?\.(?:ttf|otf))\)/g)].map(m => m[1].replace(/['"]/g, ''));
-    if (!urls.length) return null;
-    // the latin subset is listed last; prefer a URL without a subset comment when there are several
-    const blocks = css.split('@font-face').filter(b => /url\(/.test(b));
-    const pickBlock = blocks.find(b => /\/\*\s*latin\s*\*\//.test(b)) || blocks[blocks.length - 1] || '';
-    const url = (pickBlock.match(/url\(([^)]+?\.(?:ttf|otf))\)/) || [])[1] || urls[urls.length - 1];
-    const data = await fetchBuf(net, url.replace(/['"]/g, ''));
+    const notes = [];
+    const got = (await fromGoogleCss(net, family, wght, ital, notes).catch(e => { notes.push('google ' + e.message); return null; }))
+      || (await fromFontsource(net, family, wght, ital, notes));
+    log(`font download ${family} ${wght}${ital ? 'i' : ''}: ${got ? 'ok from ' + got.src : 'not found'} ${notes.length ? '(' + notes.join('; ') + ')' : ''}`);
+    if (!got) return null;
     let faces;
-    try { faces = Sfnt.describe(new Uint8Array(data)); } catch { throw new Error('Downloaded file is not a font'); }
+    try { faces = Sfnt.describe(new Uint8Array(got.data)); } catch { throw new Error('Downloaded file is not a font'); }
     const face = faces[0];
-    const WN = { 100: 'Thin', 200: 'ExtraLight', 300: 'Light', 400: '', 500: 'Medium', 600: 'SemiBold', 700: 'Bold', 800: 'ExtraBold', 900: 'Black' };
     const style = (WN[wght] || '') + (italic ? 'Italic' : '') || 'Regular';
-    const fileName = `${family.replace(/\s+/g, '')}-${style}${/\.otf/i.test(url) ? '.otf' : '.ttf'}`;
+    const fileName = `${family.replace(/\s+/g, '')}-${style}${got.ext}`;
     const dir = installDir(app);
     fs.mkdirSync(dir, { recursive: true });
     const file = path.join(dir, fileName);
-    fs.writeFileSync(file, data);
+    fs.writeFileSync(file, got.data);
     await register(file, `${face.full || family + ' ' + style}`);
     await getList(true);
     const entry = (await getList()).find(f => f.file === file);

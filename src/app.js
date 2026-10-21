@@ -612,6 +612,7 @@ function selectAnnot(key, id) {
   const { a } = id ? findAnnot(key, id) : {};
   if (a && a.type === 'text') showTextStyle(a);
   updateTextOpts();
+  updateFontPanel();
 }
 function deleteAnnot(key, id) {
   const { p, a } = findAnnot(key, id); if (!a) return;
@@ -856,12 +857,12 @@ function updateTextOpts() {
   $('#textOpts').classList.toggle('dim', !(state.tool === 'text' || state.tool === 'edit' || selectedText()));
 }
 function showTextStyle(a) {
-  $('#fontSize').value = String(Math.round(a.size * 2) / 2);
-  if (![...$('#fontSize').options].some(o => o.value === $('#fontSize').value)) {
-    const o = document.createElement('option'); o.value = o.textContent = $('#fontSize').value; $('#fontSize').appendChild(o);
-    [...$('#fontSize').options].sort((x, y) => x.value - y.value).forEach(o2 => $('#fontSize').appendChild(o2));
-    $('#fontSize').value = String(Math.round(a.size * 2) / 2);
+  const sel = $('#fontSize'), v = String(Math.round(a.size * 2) / 2);
+  if (![...sel.options].some(o => o.value === v)) {
+    const o = document.createElement('option'); o.value = o.textContent = v; sel.appendChild(o);
+    [...sel.options].sort((x, y) => +x.value - +y.value).forEach(o2 => sel.appendChild(o2));
   }
+  sel.value = v;
   $('#textColor').value = a.color;
   const rf = a.fk && PSF.get(a.fk);
   if (rf) { ensureFamilyOption(rf.family); $('#fontFamily').value = 'fam:' + rf.family; }
@@ -1202,9 +1203,14 @@ function applyRealFont(p, a, rec, newSize) {
   else { relayout(a); renderAnnots(p); selectAnnot(p.key, a.id); }
   if (selectedText() === a) showTextStyle(a);
   refreshThumbSoon(p.key);
+  updateFontPanel();
 }
+const WEIGHT_NAMES = { 100: 'Thin', 200: 'ExtraLight', 300: 'Light', 400: 'Regular', 500: 'Medium', 600: 'SemiBold', 700: 'Bold', 800: 'ExtraBold', 900: 'Black' };
+function setFontInfo(a, info) { a.ofont = { ...(a.ofont || {}), ...info }; if (selectedText() === a) updateFontPanel(); }
 async function findOriginalFont(p, a, pdfName, b, h) {
   try {
+    const P0 = PSF.parseName(String(pdfName).replace(/^[A-Z]{6}\+/, ''), a.bold, a.italic);
+    setFontInfo(a, { name: P0.display, style: (WEIGHT_NAMES[P0.weight] || '') + (P0.italic ? ' Italic' : ''), query: P0.display, status: 'searching', pdfName, suggestions: [] });
     diag('font lookup', pdfName, a.bold ? 'bold' : '', a.italic ? 'italic' : '');
     const r = await PSF.resolvePdfFont(pdfName, a.bold, a.italic, msg => status(msg));
     diag('font lookup result', pdfName, r && r.rec ? `${r.how} ${r.rec.family} ${r.rec.style}` : 'none');
@@ -1212,7 +1218,9 @@ async function findOriginalFont(p, a, pdfName, b, h) {
     const shown = r && r.display || pdfName.replace(/[,\-].*$/, '').replace(/(PS)?MT$/, '');
     if (!r || r.none) {
       // Not installed and not downloadable: pick the most similar-looking font on this PC instead of a generic one
-      const best = b && h ? await matchScannedFont(p, a, b, h, { weight: r && r.weight, italic: r && r.italic, keepSize: true, suggest: true }) : null;
+      setFontInfo(a, { status: 'lookalike-search' });
+      const best = b && h ? await matchScannedFont(p, a, b, h, { weight: r && r.weight, italic: r && r.italic, cls: a.font, keepSize: true, suggest: true }) : null;
+      setFontInfo(a, { status: best ? 'lookalike' : 'none', using: best ? best.rec.family : null });
       if (!fontNotices.has(shown)) {
         fontNotices.add(shown);
         toast(best ? `“${shown}” isn't on this PC and couldn't be downloaded. Using the closest-looking font, ${best.rec.family}. Other close matches are at the top of the font list.`
@@ -1221,12 +1229,13 @@ async function findOriginalFont(p, a, pdfName, b, h) {
       return;
     }
     applyRealFont(p, a, r.rec);
+    setFontInfo(a, { status: r.how, using: r.rec.family });
     const key = shown + r.how;
     if (fontNotices.has(key)) return; fontNotices.add(key);
     if (r.how === 'downloaded') toast(`Downloaded and installed the font “${r.rec.family}”.`, false, 5000);
     else if (r.how === 'substitute') toast(`“${r.original}” isn't on this PC; using ${r.name}, which has identical letter sizes.`, false, 6000);
     else if (r.how === 'substitute-downloaded') toast(`“${r.original}” isn't free to download; installed ${r.name}, which has identical letter sizes.`, false, 6000);
-  } catch (e) { console.warn('font lookup failed', e); status('Ready'); }
+  } catch (e) { console.warn('font lookup failed', e); status('Ready'); setFontInfo(a, { status: 'none' }); }
 }
 
 /* Scanned pages contain pictures of letters, not fonts. To keep the look, the scanned line is compared
@@ -1266,6 +1275,8 @@ function similarity(A, B) { // correlation of two ink maps
   for (let i = 0; i < n; i++) { const x = A[i] - ma, y = B[i] - mb; num += x * y; da += x * x; db += y * y; }
   return num / Math.sqrt(da * db || 1);
 }
+const SERIF_FAMS = new Set(['Times New Roman', 'Cambria', 'Georgia', 'Garamond', 'Book Antiqua', 'Palatino Linotype', 'Century Schoolbook', 'Bookman Old Style',
+  'Constantia', 'Liberation Serif', 'DejaVu Serif', 'Caladea', 'Times'].map(f => f.toLowerCase().replace(/[\s\-_,]+/g, '')));
 // Families with a similar look to popular web/brand fonts, checked as well when looking for a look-alike
 const LOOKALIKE_EXTRA = ['Century Gothic', 'Futura', 'Futura PT', 'Avenir', 'Avenir Next', 'Avenir LT Std', 'Gotham', 'Montserrat', 'Poppins', 'Raleway', 'Nunito',
   'Nunito Sans', 'Open Sans', 'Roboto', 'Lato', 'Source Sans Pro', 'Source Sans 3', 'Bahnschrift', 'Tw Cen MT', 'Segoe UI Semibold', 'Inter', 'Noto Sans'];
@@ -1275,7 +1286,9 @@ async function matchScannedFont(p, a, b, h, opts = {}) {
     if (!line || line.text.length < 3) return;
     const cjk = CJK.needs(line.text);
     const all = await PSF.families(), have = new Set(all.map(PSF.famKey));
-    const cands = [...new Set(cjk ? SCAN_FONTS_CJK : [...SCAN_FONTS_LATIN, ...LOOKALIKE_EXTRA])].filter(f => have.has(PSF.famKey(f)));
+    const cls = f => SERIF_FAMS.has(PSF.famKey(f)) ? 'serif' : /courier|mono|consol/i.test(f) ? 'mono' : 'sans';
+    const cands = [...new Set(cjk ? SCAN_FONTS_CJK : [...SCAN_FONTS_LATIN, ...LOOKALIKE_EXTRA])]
+      .filter(f => have.has(PSF.famKey(f)) && (cjk || !opts.cls || cls(f) === opts.cls));
     if (!cands.length) return null;
     status(opts.keepSize ? 'Finding the closest-looking font…' : 'Matching the scanned font…');
     // the scanned line
@@ -1293,7 +1306,7 @@ async function matchScannedFont(p, a, b, h, opts = {}) {
     const GW = clamp(Math.round(24 * sw / sh), 24, 480), GH = 24;
     const target = sampleBox(scan, GW, GH);
     let best = null; const results = [], tried = new Set();
-    const weights = [...new Set([opts.weight || 400, 400, 700])];
+    const weights = opts.weight ? [opts.weight] : [400, 700]; // known weight: only compare faces of that weight
     const R = document.createElement('canvas'), rctx = R.getContext('2d', { willReadFrequently: true });
     for (const fam of cands) for (const w of weights) {
       const e = await PSF.faceOf(fam, w, !!opts.italic);
@@ -1319,11 +1332,49 @@ async function matchScannedFont(p, a, b, h, opts = {}) {
     status('Ready');
     results.sort((x, y) => y.score - x.score);
     diag('look-alike fonts', results.slice(0, 5).map(r => `${r.rec.family} ${r.rec.style} ${r.score.toFixed(2)}`).join(', '));
-    if (opts.suggest) showFontSuggestions(results.filter((r, i, arr) => arr.findIndex(q => q.rec.family === r.rec.family) === i).slice(0, 5).map(r => r.rec.family));
+    const sugg = results.filter((r, i, arr) => arr.findIndex(q => q.rec.family === r.rec.family) === i).slice(0, 5).map(r => r.rec.family);
+    if (opts.suggest) { showFontSuggestions(sugg); setFontInfo(a, { suggestions: sugg }); }
+    if (!opts.keepSize) setFontInfo(a, { name: 'Scanned text', style: '', query: '', status: best && best.score > 0.2 ? 'scan-match' : 'none', using: best && best.score > 0.2 ? best.rec.family : null });
     if (best && best.score > 0.2) { applyRealFont(p, a, best.rec, opts.keepSize ? null : Math.round(best.size * 2) / 2); return best; }
     return null;
   } catch (e) { console.warn('font matching failed', e); status('Ready'); return null; }
 }
+/* Font panel: stays open while a text box is selected and tells what font the original text used,
+   whether it was found, and offers look-alikes and a link to find the font online. */
+function updateFontPanel() {
+  const panel = $('#fontPanel'), a = selectedText();
+  const o = a && a.ofont;
+  if (!o || o.dismissed) { panel.classList.add('hidden'); return; }
+  const esc = t => String(t).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const msg = {
+    searching: 'Looking for this font…', 'lookalike-search': 'Not found — finding the closest-looking font on this PC…',
+    installed: '✓ Installed on this PC — used for your edits.', downloaded: '✓ Downloaded and installed — used for your edits.',
+    substitute: `Not on this PC — using <b>${esc(o.using)}</b>, which has identical letter sizes.`,
+    'substitute-downloaded': `Not free to download — installed <b>${esc(o.using)}</b>, which has identical letter sizes.`,
+    lookalike: `<span class="warn">Not on this PC and couldn't be downloaded.</span> Using the closest look-alike: <b>${esc(o.using)}</b>.`,
+    none: '<span class="warn">Not on this PC and couldn\'t be downloaded.</span> Pick a font below or from the font list.',
+    'scan-match': `Fonts can't be read from a scan; closest match by letter shape: <b>${esc(o.using)}</b>.`,
+  }[o.status] || '';
+  const chips = (o.suggestions || []).map(f => `<button class="fchip${f === o.using ? ' on' : ''}" data-fam="${esc(f)}" style="font-family:'${esc(f)}'">${esc(f)}</button>`).join('');
+  panel.innerHTML = `<div class="fphead"><span>${o.query ? 'Original font' : 'Font'}</span><button class="icon fpx" title="Hide">${DEL_SVG}</button></div>
+    <div class="fpname">${esc(o.name || '')}${o.style ? ` <span class="fpstyle">${esc(o.style)}</span>` : ''}</div>
+    <div class="fpmsg">${msg}</div>
+    ${chips ? `<div class="fplabel">Closest look-alikes on this PC:</div><div class="fpchips">${chips}</div>` : ''}
+    <div class="fpbtns">${o.query ? `<button class="small fpfind">Find “${esc(o.query)}” online</button><button class="small fprecheck" title="After installing the font yourself">Check again</button>` : ''}</div>`;
+  panel.classList.remove('hidden');
+  panel.querySelector('.fpx').onclick = () => { o.dismissed = true; panel.classList.add('hidden'); };
+  panel.querySelectorAll('.fchip').forEach(c => { c.onmousedown = e => e.preventDefault(); c.onclick = () => { $('#fontFamily').value = 'fam:' + c.dataset.fam; ensureFamilyOption(c.dataset.fam); $('#fontFamily').value = 'fam:' + c.dataset.fam; fontChange('family').then(() => setFontInfo(a, { using: c.dataset.fam })); }; });
+  const find = panel.querySelector('.fpfind');
+  if (find) find.onclick = () => window.open('https://fonts.google.com/?query=' + encodeURIComponent(o.query), '_blank');
+  const re = panel.querySelector('.fprecheck');
+  if (re) re.onclick = async () => {
+    const p = state.pages.find(q => q.annots.includes(a)); if (!p) return;
+    await PSF.refresh();
+    const info = editInfo.get(editKeyOf(p)), b = info && info.blocks.find(x => x.id === a.fromBlock);
+    findOriginalFont(p, a, o.pdfName, b, b && await hiresRender(p));
+  };
+}
+
 /** Puts the closest-looking fonts at the top of the font list. */
 function showFontSuggestions(fams) {
   const sel = $('#fontFamily'), cur = sel.value;
