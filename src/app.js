@@ -533,6 +533,7 @@ function cssFont(a, px) {
 const measureCtx = document.createElement('canvas').getContext('2d');
 measureCtx.fontKerning = 'none'; // the PDF is written without kerning, so measure the same way
 const CJK_CHAR = /[⺀-鿿豈-﫿＀-￯　-〿]/;
+const NO_LINE_START = /^[，。、；：？！）》」』】〕〉”’….,;:?!)\]}%]/;
 function layoutLines(a) {
   const paras = a.text.split('\n');
   if (!a.w) return paras;
@@ -545,9 +546,10 @@ function layoutLines(a) {
     let line = '';
     for (const t of tokens) {
       const cand = line + t;
-      if (line.trim() && width(cand.trimEnd()) > maxW) { out.push(line.trimEnd()); line = t.replace(/^\s+/, ''); }
+      // Chinese punctuation such as ，。、）may not start a line: it stays at the end of the previous one
+      if (line.trim() && width(cand.trimEnd()) > maxW && !NO_LINE_START.test(t)) { out.push(line.trimEnd()); line = t.replace(/^\s+/, ''); }
       else line = cand;
-      while (line.length > 1 && width(line.trimEnd()) > maxW) { // a single word wider than the box
+      while (line.length > 1 && width(line.trimEnd()) > maxW && !(NO_LINE_START.test(line.slice(-1)) && width(line.slice(0, -1).trimEnd()) <= maxW)) { // a single word wider than the box
         let i = line.length - 1;
         while (i > 1 && width(line.slice(0, i)) > maxW) i--;
         out.push(line.slice(0, i)); line = line.slice(i);
@@ -603,15 +605,21 @@ const pageElOf = p => view.querySelector(`.page[data-key="${p.key}"]`);
 function renderAnnots(p, pageEl = pageElOf(p)) {
   if (!pageEl) return;
   const layer = pageEl.querySelector('.layer'), covers = pageEl.querySelector('.coverlayer');
-  layer.innerHTML = ''; covers.innerHTML = '';
+  // The box being typed in is kept as it is (not rebuilt): rebuilding it would throw away the caret and the typing
+  const keep = editing && editing.key === p.key && editing.el.isConnected && editing.el.parentNode === layer ? editing.el : null;
+  [...layer.children].forEach(c => { if (c !== keep) c.remove(); }); covers.innerHTML = '';
+  let before = keep;
   for (const a of p.annots) {
     if (a.cover) {
       const c = document.createElement('div'); c.className = 'cover';
       Object.assign(c.style, { left: a.cover.x * z() + 'px', top: a.cover.y * z() + 'px', width: a.cover.w * z() + 'px', height: a.cover.h * z() + 'px', background: a.cover.color });
       covers.appendChild(c);
     }
-    layer.appendChild(makeAnnotEl(a));
+    if (keep && a.id === editing.id) { const tb = keep.querySelector('.tbody'); if (tb) styleTextBody(tb, { ...a, text: tb.innerText }); placeEl(keep, a); before = null; continue; }
+    const el = makeAnnotEl(a);
+    if (before) layer.insertBefore(el, before); else layer.appendChild(el);
   }
+  if (keep && !p.annots.some(a => a.id === editing.id)) keep.remove();
   if (state.tool === 'edit') renderEditLayer(p, pageEl);
 }
 function findAnnot(key, id) { const p = pageByKey(key); return p ? { p, a: p.annots.find(x => x.id === id) } : {}; }
@@ -884,8 +892,11 @@ view.addEventListener('dblclick', e => {
   const an = e.target.closest('.annot-text'); if (!an) return;
   startEditing(an.closest('.page').dataset.key, an.dataset.id, false, { caretAt: { x: e.clientX, y: e.clientY } });
 });
+let composing = false; // an input method (e.g. Chinese pinyin) is building a word
+view.addEventListener('compositionstart', () => { composing = true; });
+view.addEventListener('compositionend', () => { composing = false; });
 view.addEventListener('input', e => {
-  if (!editing || !e.target.closest('.annot')) return;
+  if (!editing || !e.target.closest('.annot') || e.isComposing) return;
   const b = e.target.closest('.tbody'), { a } = findAnnot(editing.key, editing.id);
   if (b && a) styleTextBody(b, { ...a, text: b.innerText });
   setDirty();
@@ -1075,24 +1086,31 @@ function markCells(lines) {
   for (const l of lines) l.cell = lines.some(m => m !== l && Math.abs(m.base - l.base) < 0.5 * Math.max(m.size, l.size)
     && (m.left > l.right + 0.5 * l.size || m.right < l.left - 0.5 * l.size));
 }
-function linesToBlocks(lines, prefix) {
+// A line that starts a numbered or bulleted item ("1、", "2.", "(3)", "一、", "•") always starts a new paragraph
+const LIST_START = /^\s*(?:[\d０-９]{1,3}\s*[、．]|[\d]{1,3}[.)）](?=\s|\p{Script=Han})|[（(]\s*[\d一二三四五六七八九十]{1,3}\s*[)）]|[一二三四五六七八九十]{1,3}\s*[、．.]|[•·●○▪■◆◇►\-–*]\s)/u;
+function linesToBlocks(lines, prefix, opts = {}) {
   const paras = [];
   const xs = lines.map(l => l.left), xe = lines.map(l => l.right);
-  const contentW = lines.length ? Math.max(...xe) - Math.min(...xs) : 0;
+  const contentW = opts.contentW || (lines.length ? Math.max(...xe) - Math.min(...xs) : 0);
   const isShort = l => contentW > 0 && (l.right - l.left) < 0.5 * contentW;
   for (const l of lines) {
     let P = null;
+    const cj = !!l.cjk;
     for (let i = paras.length - 1; i >= 0 && i >= paras.length - 8; i--) {
       const q = paras[i], last = q.lines[q.lines.length - 1];
       const size = Math.max(q.size, l.size), gap = l.base - last.base;
       if (Math.abs(l.size / q.size - 1) > 0.18 || l.font !== q.font || l.bold !== q.bold) continue;
       if (gap < 0.85 * size || gap > 2.0 * size) continue;
       if (q.lines.length > 1 && Math.abs(gap - q.gap) > 0.25 * size) continue;
-      if (l.left < q.left - 1.5 * size || l.left > q.left + 4 * size || l.right < q.left || l.left > q.right) continue;
-      if (last.right < Math.min(q.right, l.right) - 5 * size) continue; // previous line ended early: new paragraph
+      // the 2nd line may start left of an indented 1st line (Chinese paragraphs indent the 1st line by 2 characters)
+      const back = q.lines.length === 1 ? 2.6 : 1.5;
+      if (l.left < q.left - back * size || l.left > q.left + (cj ? 1.2 : 4) * size || l.right < q.left || l.left > q.right) continue;
+      // previous line ended early: new paragraph (Chinese lines fill the whole width, so a much smaller gap counts)
+      if (last.right < Math.max(q.right, l.right) - (cj || last.cjk ? 1.6 : 5) * size) continue;
       if (l.cell || last.cell) continue; // rows of a table are separate cells
-      // two short lines one under the other (headings, label lists) are separate items, not one wrapped paragraph
-      if (isShort(last) && isShort(l) && !/[,;:\-–(&]$/.test(last.text) && /^[\p{Lu}\p{N}]/u.test(l.text)) continue;
+      if (LIST_START.test(l.text)) continue; // a new numbered / bulleted item
+      // two short lines one under the other (headings, label lists, a signature block) are separate items, not one wrapped paragraph
+      if (isShort(last) && isShort(l) && !/[,;:\-–(&，、]$/.test(last.text) && /^[\p{Lu}\p{N}\p{Script=Han}]/u.test(l.text)) continue;
       P = q; break;
     }
     if (!P) { paras.push({ lines: [l], left: l.left, right: l.right, size: l.size, font: l.font, bold: l.bold, italic: l.italic, pdfFont: l.pdfFont, gap: 0 }); continue; }
@@ -1108,7 +1126,8 @@ function linesToBlocks(lines, prefix) {
     const bottom = Math.max(...q.lines.map(l => l.bottom ?? (l.base + f.desc * size)));
     return { id: prefix + i, kind: 'text', text: joinLines(q.lines.map(l => l.text)), size, lh: clamp(lh, 0.9, 2.5), font: q.font, bold: q.bold, italic: q.italic,
       pdfFont: q.pdfFont || '', firstBase: first, x: q.left, y, w: q.right - q.left, h: bottom - y,
-      lines: q.lines.map(l => ({ text: l.text, left: l.left, right: l.right, top: l.top ?? (l.base - f.asc * size), bottom: l.bottom ?? (l.base + f.desc * size), base: l.base })) };
+      cjk: q.lines.some(l => l.cjk), indent: q.lines.length > 1 ? q.lines[0].left - Math.min(...q.lines.slice(1).map(l => l.left)) : 0,
+      lines: q.lines.map(l => ({ text: l.text, left: l.left, right: l.right, top: l.top ?? (l.base - f.asc * size), bottom: l.bottom ?? (l.base + f.desc * size), base: l.base, glyphs: l.glyphs || null })) };
   });
 }
 async function detectBlocks(p) {
@@ -1234,9 +1253,18 @@ async function convertBlock(p, blockId, caretAt, opts = {}) {
     let margin = Math.max(b.x + b.w, info.contentRight || 0);
     // one-line items (headings, table cells, labels) can grow to the right up to the page margin
     if ((b.lines || []).length <= 1) margin = Math.max(margin, dispDims(p).W - Math.max(36, Math.min(72, b.x)));
-    const a = { id: newId(), type: 'text', text: b.text, orig: b.text, size: Math.round(b.size * 2) / 2, color: col.fg, font: b.font, bold: b.bold, italic: b.italic,
+    // Chinese paragraphs indent the first line by whole characters: keep that as ideographic spaces
+    const ind = b.cjk && b.indent > 0.6 * b.size ? Math.min(4, Math.round(b.indent / b.size)) : 0;
+    const text = (ind ? '\u3000'.repeat(ind) : '') + b.text;
+    const a = { id: newId(), type: 'text', text, orig: text, size: Math.round(b.size * 2) / 2, color: col.fg, font: b.font, bold: b.bold, italic: b.italic,
       lh: Math.round(b.lh * 100) / 100, w: margin - b.x + b.size * 0.6, fromBlock: b.id, cover: { x: b.x - pad, y: b.y - pad * 0.6, w: b.w + 2 * pad, h: b.h + pad * 1.2, color: col.bg } };
     a.x = b.x; a.base0 = b.firstBase; a.y = b.firstBase - a.size * baselineOf(a);
+    // Chinese text: make the box exactly as wide as the longest original line, so the lines break where they did
+    if (b.cjk && (b.lines || []).length > 1) {
+      const longest = [...b.lines].sort((l1, l2) => (l2.right - l2.left) - (l1.right - l1.left))[0];
+      a.wrapText = (longest === b.lines[0] && ind ? '\u3000'.repeat(ind) : '') + longest.text;
+      fitWrap(a);
+    }
     relayout(a);
     const before = snapshot();
     p.annots.push(a);
@@ -1263,14 +1291,26 @@ async function convertBlock(p, blockId, caretAt, opts = {}) {
 // After a paragraph is opened for editing, look up its real font (installed / downloaded / free equivalent)
 // and switch the editable copy to it, keeping the text sitting on the same baseline.
 const fontNotices = new Set();
+function fitWrap(a) {
+  if (!a.wrapText || (a.fitW && Math.abs(a.w - a.fitW) > 0.5)) return; // the user resized the box: leave it
+  measureCtx.font = cssFont(a, 100);
+  a.w = a.fitW = measureCtx.measureText(a.wrapText).width * a.size / 100 + 0.45 * a.size;
+}
 function applyRealFont(p, a, rec, newSize) {
   if (!p.annots.includes(a)) return;
   a.fk = rec.key; a.fname = rec.family; a.bold = rec.bold; a.italic = rec.italic;
   if (newSize) a.size = newSize;
   if (a.base0 != null && !a.moved) a.y = a.base0 - a.size * baselineOf(a);
+  fitWrap(a);
   const ed = editing && editing.id === a.id ? editing : null;
-  if (ed) { const body = ed.el.querySelector('.tbody'); styleTextBody(body, { ...a, text: body.innerText }); placeEl(ed.el, a); }
-  else { relayout(a); renderAnnots(p); selectAnnot(p.key, a.id); }
+  if (ed) {
+    // while a Chinese/Japanese input method is composing a word, wait until it is done before restyling the box
+    const restyle = () => { if (editing !== ed) return; const body = ed.el.querySelector('.tbody'); styleTextBody(body, { ...a, text: body.innerText }); placeEl(ed.el, a); };
+    if (composing) ed.el.addEventListener('compositionend', () => setTimeout(restyle, 0), { once: true }); else restyle();
+  } else {
+    relayout(a); renderAnnots(p);
+    if (!editing && (!state.selAnnot || state.selAnnot.id === a.id)) selectAnnot(p.key, a.id); // don't take the selection from another box
+  }
   if (selectedText() === a) showTextStyle(a);
   refreshThumbSoon(p.key);
   updateFontPanel();
@@ -1314,13 +1354,19 @@ async function findOriginalFont(p, a, pdfName, b, h) {
 const SCAN_FONTS_LATIN = ['Arial', 'Helvetica', 'Calibri', 'Aptos', 'Times New Roman', 'Cambria', 'Georgia', 'Garamond', 'Book Antiqua', 'Palatino Linotype',
   'Verdana', 'Tahoma', 'Segoe UI', 'Trebuchet MS', 'Century Gothic', 'Century Schoolbook', 'Bookman Old Style', 'Franklin Gothic Book', 'Gill Sans MT',
   'Arial Narrow', 'Candara', 'Corbel', 'Constantia', 'Courier New', 'Liberation Sans', 'Liberation Serif', 'DejaVu Sans', 'DejaVu Serif', 'Carlito', 'Caladea'];
-const SCAN_FONTS_CJK = ['Microsoft YaHei', 'SimSun', 'SimHei', 'DengXian', 'Microsoft JhengHei', 'PMingLiU', 'KaiTi', 'WenQuanYi Zen Hei', 'Noto Sans CJK SC'];
-function inkBox(ctx, w, h, bgLum) {
+// Chinese fonts found on Windows (and common free ones). Song/Ming (serif), Hei (sans), Kai (brush) and FangSong look very different.
+const SCAN_FONTS_CJK = ['SimSun', 'NSimSun', 'SimHei', 'Microsoft YaHei', 'DengXian', 'KaiTi', 'FangSong', 'STSong', 'STZhongsong', 'STFangsong', 'STKaiti', 'STHeiti', 'STXihei',
+  'Microsoft JhengHei', 'PMingLiU', 'MingLiU', 'DFKai-SB', 'Source Han Serif SC', 'Source Han Sans SC', 'Noto Serif CJK SC', 'Noto Sans CJK SC', 'Noto Serif SC', 'Noto Sans SC',
+  'Noto Serif CJK TC', 'Noto Sans CJK TC', 'WenQuanYi Zen Hei', 'WenQuanYi Micro Hei', 'AR PL UMing CN', 'AR PL UKai CN', 'Droid Sans Fallback'];
+function inkBox(ctx, w, h, bgLum, linear) {
   const d = ctx.getImageData(0, 0, w, h).data, m = new Float32Array(w * h);
   let x0 = w, y0 = h, x1 = -1, y1 = -1;
+  // linear: ink measured against the darkest ink in the picture, so a blurred scan keeps the same total amount of ink
+  let span = Math.max(40, bgLum * 0.6);
+  if (linear) { let mn = 255; for (let i = 0; i < w * h; i++) mn = Math.min(mn, 0.299 * d[i * 4] + 0.587 * d[i * 4 + 1] + 0.114 * d[i * 4 + 2]); span = Math.max(40, bgLum - mn); }
   for (let i = 0; i < w * h; i++) {
     const L = 0.299 * d[i * 4] + 0.587 * d[i * 4 + 1] + 0.114 * d[i * 4 + 2];
-    const ink = clamp((bgLum - L) / Math.max(40, bgLum * 0.6), 0, 1);
+    const ink = clamp((bgLum - L) / span, 0, 1);
     m[i] = ink;
     if (ink > 0.35) { const x = i % w, y = (i / w) | 0; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
   }
@@ -1356,6 +1402,7 @@ async function matchScannedFont(p, a, b, h, opts = {}) {
     if (!line || line.text.length < 3) return;
     const cjk = CJK.needs(line.text);
     const all = await PSF.families(), have = new Set(all.map(PSF.famKey));
+    if (cjk) return await matchCjkFont(p, a, b, h, opts, SCAN_FONTS_CJK.filter(f => have.has(PSF.famKey(f))));
     const cls = f => SERIF_FAMS.has(PSF.famKey(f)) ? 'serif' : /courier|mono|consol/i.test(f) ? 'mono' : 'sans';
     const cands = [...new Set(cjk ? SCAN_FONTS_CJK : [...SCAN_FONTS_LATIN, ...LOOKALIKE_EXTRA])]
       .filter(f => have.has(PSF.famKey(f)) && (cjk || !opts.cls || cls(f) === opts.cls));
@@ -1408,6 +1455,88 @@ async function matchScannedFont(p, a, b, h, opts = {}) {
     if (best && best.score > 0.2) { applyRealFont(p, a, best.rec, opts.keepSize ? null : Math.round(best.size * 2) / 2); return best; }
     return null;
   } catch (e) { console.warn('font matching failed', e); status('Ready'); return null; }
+}
+/* Chinese scans: compare single characters. Each character the OCR found is cut out of the scan and compared
+   with the same character drawn in every Chinese font on this PC: its shape, how wide/tall it is and how heavy
+   its strokes are (a Song face has thin strokes with serifs, Hei is even and heavy, Kai is brush-like). */
+const cjkMatchCache = new Map(); // page + text size -> result, so the next paragraph opens instantly
+async function matchCjkFont(p, a, b, h, opts, cands) {
+  const ck = `${p.key}|${Math.round(b.size)}|${opts.weight || ''}`;
+  if (cjkMatchCache.has(ck)) {
+    const c = await cjkMatchCache.get(ck);
+    if (c) { if (opts.suggest) { showFontSuggestions(c.sugg); setFontInfo(a, { suggestions: c.sugg }); }
+      if (!opts.keepSize) setFontInfo(a, { name: 'Scanned text', style: '', query: '', status: 'scan-match', using: c.best.rec.family });
+      applyRealFont(p, a, c.best.rec, null); return c.best; }
+  }
+  let done; cjkMatchCache.set(ck, new Promise(r => { done = r; }));
+  try { const r = await matchCjkFontNow(p, a, b, h, opts, cands); done(r); if (!r) cjkMatchCache.delete(ck); return r && r.best; }
+  catch (e) { done(null); cjkMatchCache.delete(ck); throw e; }
+}
+async function matchCjkFontNow(p, a, b, h, opts, cands) {
+  const glyphs = [], seen = new Set();
+  const take = ls => { for (const l of ls) for (const g of l.glyphs || []) if (!seen.has(g.ch) && glyphs.length < 16) { seen.add(g.ch); glyphs.push(g); } };
+  take(b.lines || []);
+  // a short line (a list item, a heading) has few characters: borrow more from same-size text on the page (usually the same font)
+  if (glyphs.length < 8) {
+    const info = editInfo.get(editKeyOf(p));
+    for (const o of (info && info.blocks) || []) if (o !== b && o.kind === 'text' && o.cjk && Math.abs(o.size / b.size - 1) < 0.15) take(o.lines || []);
+  }
+  if (!cands.length) return null;
+  status('Matching the scanned Chinese font…');
+  const s = h.scale, em = a.size;
+  const bgL = (() => { const c = parseInt(sampleColors(h, b).bg.slice(1), 16); return 0.299 * (c >> 16) + 0.587 * ((c >> 8) & 255) + 0.114 * (c & 255); })();
+  const G = 20, cell = document.createElement('canvas'), cctx = cell.getContext('2d', { willReadFrequently: true });
+  const targets = [];
+  for (const g of glyphs) {
+    // the character's own box (a little margin), not its neighbours
+    const m = 0;
+    const x = Math.max(0, Math.floor((g.x0 - m) * s)), y = Math.max(0, Math.floor((g.y0 - m) * s));
+    const w = Math.min(h.canvas.width - x, Math.ceil((g.x1 - g.x0 + 2 * m) * s)), hh = Math.min(h.canvas.height - y, Math.ceil((g.y1 - g.y0 + 2 * m) * s));
+    if (w < 6 || hh < 6) continue;
+    cell.width = w; cell.height = hh; cctx.drawImage(h.canvas, x, y, w, hh, 0, 0, w, hh);
+    const ib = inkBox(cctx, w, hh, bgL, true); if (ib.x1 < 0) continue;
+    let ink = 0; for (let i = 0; i < ib.m.length; i++) ink += ib.m[i];
+    targets.push({ ch: g.ch, map: sampleBox(ib, G, G), aspect: (ib.x1 - ib.x0 + 1) / (ib.y1 - ib.y0 + 1), dens: ink / Math.pow(em * s, 2), fill: (ib.y1 - ib.y0 + 1) / (em * s) });
+  }
+  const text = (b.lines || []).map(l => l.text).join('');
+  const weights = opts.weight ? [opts.weight] : [400, 700];
+  const results = [], tried = new Set(), R = document.createElement('canvas'), rctx = R.getContext('2d', { willReadFrequently: true });
+  const px = 64; R.width = R.height = Math.round(px * 1.4);
+  for (const fam of cands) for (const wt of weights) {
+    const e = await PSF.faceOf(fam, wt, false);
+    if (!e || Math.abs((e.weight || (e.bold ? 700 : 400)) - wt) > 100) continue;
+    const ek = e.file + '#' + e.index; if (tried.has(ek)) continue; tried.add(ek);
+    let rec; try { rec = await PSF.load(e); } catch { continue; }
+    if (!rec.f.covers(text.replace(/[^⺀-鿿豈-﫿　-〿＀-￯]/g, ''))) continue;
+    let sum = 0, n = 0; const dbg = [0, 0, 0, 0];
+    for (const t of targets) {
+      rctx.fillStyle = '#fff'; rctx.fillRect(0, 0, R.width, R.height);
+      rctx.font = `${px}px ${rec.css}`; rctx.fillStyle = '#000'; rctx.textBaseline = 'alphabetic';
+      rctx.fillText(t.ch, Math.round(px * 0.2), Math.round(px * 1.1));
+      const ib = inkBox(rctx, R.width, R.height, 255, true); if (ib.x1 < 0) continue;
+      let ink = 0; for (let i = 0; i < ib.m.length; i++) ink += ib.m[i];
+      const dens = ink / (px * px), aspect = (ib.x1 - ib.x0 + 1) / (ib.y1 - ib.y0 + 1), fill = (ib.y1 - ib.y0 + 1) / px;
+      const f1 = similarity(t.map, sampleBox(ib, G, G)), f2 = Math.abs(Math.log(t.aspect / aspect)), f3 = Math.log(t.dens / dens), f4 = Math.log(t.fill / fill);
+      sum += f1 - 0.8 * f2 - 0.6 * Math.abs(f3) - 0.5 * Math.abs(f4);
+      dbg[0] += f1; dbg[1] += f2; dbg[2] += f3; dbg[3] += f4;
+      n++;
+    }
+    if (window.__cjkDebug) console.log('[diag] cjk', rec.family, rec.style, dbg.map(v => (v / n).toFixed(2)).join(' '));
+    // CFF (PostScript-outline) Chinese fonts can't be cut down to the characters used, so they make big PDFs: prefer TrueType ones
+    if (n || !targets.length) results.push({ score: (n ? sum / n : 0) - (e.cff ? 0.06 : 0), rec });
+  }
+  status('Ready');
+  results.sort((x, y) => y.score - x.score);
+  diag('look-alike fonts (Chinese, ' + targets.length + ' characters)', results.slice(0, 6).map(r => `${r.rec.family} ${r.rec.style} ${r.score.toFixed(2)}`).join(', '));
+  const sugg = results.filter((r, i, arr) => arr.findIndex(q => q.rec.family === r.rec.family) === i).slice(0, 5).map(r => r.rec.family);
+  if (opts.suggest) { showFontSuggestions(sugg); setFontInfo(a, { suggestions: sugg }); }
+  // with no characters to compare, a Song (serif) face is the usual choice for printed Chinese documents
+  let best = targets.length >= 2 ? results[0] : null;
+  if (!best) for (const f of ['SimSun', 'NSimSun', 'STSong', 'Noto Serif CJK SC', 'Source Han Serif SC', 'Microsoft YaHei']) { best = results.find(r => r.rec.family === f); if (best) break; }
+  best = best || results[0];
+  if (!opts.keepSize) setFontInfo(a, { name: 'Scanned text', style: '', query: '', status: best ? 'scan-match' : 'none', using: best ? best.rec.family : null });
+  if (best) { applyRealFont(p, a, best.rec, null); return { best, sugg }; }
+  return null;
 }
 /* Font panel: stays open while a text box is selected and tells what font the original text used,
    whether it was found, and offers look-alikes and a link to find the font online. */
@@ -1503,6 +1632,35 @@ function getOcrWorker(langs) {
 }
 const cleanOcr = s => s.replace(/\s+/g, ' ').trim()
   .replace(/([⺀-鿿豈-﫿＀-￯　-〿]) (?=[⺀-鿿豈-﫿＀-￯　-〿])/g, '$1');
+const HAN = /[㐀-鿿豈-﫿々-〇]/; // Chinese characters (not punctuation)
+const FULLW = /[⺀-鿿豈-﫿＀-￯　-〿]/; // full-width: characters and CJK punctuation
+/* Chinese lines: Tesseract's row height counts ascender and descender room that Chinese characters don't have,
+   so the size would come out ~40% too big. Chinese characters are all one em wide, so the character pitch along
+   the line (and the height of the characters themselves) gives the real font size. */
+function cjkLineMetrics(l, scale, text) {
+  const chars = [...text.replace(/\s+/g, '')];
+  const full = chars.filter(c => FULLW.test(c)).length, half = chars.length - full;
+  if (chars.filter(c => HAN.test(c)).length < 2) return null;
+  const bb = l.bbox, words = l.words || [];
+  const hs = [], bottoms = [];
+  for (const w of words) {
+    const t = String(w.text || '').trim(), b = w.bbox; if (!b || !t) continue;
+    if ([...t].every(c => HAN.test(c))) { hs.push((b.y1 - b.y0) / scale); bottoms.push(b.y1 / scale); }
+  }
+  const width = (bb.x1 - bb.x0) / scale;
+  const pitch = width / Math.max(1, full + 0.55 * half - 0.08); // the line box starts and ends at ink, not at the character cell
+  const hSize = hs.length >= 2 ? median(hs) / 0.93 : (bb.y1 - bb.y0) / scale / 1.02;
+  // justified lines stretch the pitch; trust it only when it agrees with the character height
+  const size = full >= 4 && full >= 0.8 * chars.length && pitch > 0.8 * hSize && pitch < 1.15 * hSize ? Math.min(pitch, 1.08 * hSize) : hSize;
+  // Chinese characters sit about 0.1 em below the baseline that Latin letters stand on
+  const base = (bottoms.length >= 2 ? median(bottoms) : bb.y1 / scale) - 0.11 * size;
+  // Where each character is: Chinese characters follow one another at a fixed pitch from the start of the line
+  // (OCR's own per-character boxes are often off), up to the first half-width letter or digit.
+  const glyphs = [], p = full === chars.length ? pitch : size, left = bb.x0 / scale - 0.05 * p;
+  for (let i = 0; i < chars.length && FULLW.test(chars[i]); i++)
+    if (HAN.test(chars[i])) glyphs.push({ ch: chars[i], x0: left + i * p + 0.03 * p, x1: left + (i + 1) * p - 0.03 * p, y0: bb.y0 / scale, y1: bb.y1 / scale });
+  return { size, base, glyphs };
+}
 function blocksFromOcr(data, scale, p) {
   const lines = [];
   const paras = data.paragraphs?.length ? data.paragraphs : (data.blocks || []).flatMap(b => b.paragraphs || []);
@@ -1510,21 +1668,37 @@ function blocksFromOcr(data, scale, p) {
   paras.forEach((para, pi) => {
     for (const l of para.lines || []) {
       const text = cleanOcr(l.text || '');
-      if (!text || (l.confidence ?? 100) < 40 || !/[\p{L}\p{N}]/u.test(text)) continue;
+      if (!text || (l.confidence ?? 100) < 35 || !/[\p{L}\p{N}]/u.test(text)) continue;
       const bb = l.bbox, ra = l.rowAttributes || {};
-      // Tesseract's row height (x-height + ascenders + descenders) is about 87% of the font size
-      const size = (ra.row_height ? ra.row_height * 1.15 : (bb.y1 - bb.y0) * 0.9) / scale;
+      const cj = cjkLineMetrics(l, scale, text);
+      // Latin text: Tesseract's row height (x-height + ascenders + descenders) is about 87% of the font size
+      let size = cj ? cj.size : (ra.row_height ? ra.row_height * 1.15 : (bb.y1 - bb.y0) * 0.9) / scale;
       if (size < 3 || size > 200) continue;
       const bl = l.baseline && l.baseline.has_baseline !== false ? l.baseline : null;
-      const base = bl ? bl.y0 / scale + (bl.y1 - bl.y0) / scale * ((bb.x0 - bl.x0) / Math.max(1, bl.x1 - bl.x0)) : bb.y1 / scale - size * 0.2;
-      lines.push({ text, left: bb.x0 / scale, right: bb.x1 / scale, base, size, top: bb.y0 / scale, bottom: bb.y1 / scale, font: 'sans', bold: false, italic: false, para: pi });
+      const base = cj ? cj.base : bl ? bl.y0 / scale + (bl.y1 - bl.y0) / scale * ((bb.x0 - bl.x0) / Math.max(1, bl.x1 - bl.x0)) : bb.y1 / scale - size * 0.2;
+      lines.push({ text, left: bb.x0 / scale, right: bb.x1 / scale, base, size, top: bb.y0 / scale, bottom: bb.y1 / scale, font: 'sans', bold: false, italic: false,
+        para: pi, cjk: !!cj, glyphs: cj ? cj.glyphs : null });
     }
   });
-  // keep Tesseract's own paragraphs, but split any that our layout rules see as separate
+  markCells(lines);
+  // keep Tesseract's own paragraphs, but split any that our layout rules see as separate (list items, indents, short lines)
+  const contentW = lines.length ? Math.max(...lines.map(l => l.right)) - Math.min(...lines.map(l => l.left)) : 0;
   const out = [];
   const groups = [...new Set(lines.map(l => l.para))];
-  for (const g of groups) out.push(...linesToBlocks(lines.filter(l => l.para === g).sort((a, b) => a.base - b.base), `o${g}_`));
+  for (const g of groups) out.push(...linesToBlocks(lines.filter(l => l.para === g).sort((a, b) => a.base - b.base), `o${g}_`, { contentW }));
   return out.filter(b => b.x < W);
+}
+/* After a Chinese-only read, lines with no Chinese in them (English or Malay) are taken from the first,
+   all-languages read when that one was more confident about them. */
+function mergeLatinLines(zhData, first) {
+  const linesOf = d => (d.paragraphs?.length ? d.paragraphs : (d.blocks || []).flatMap(b => b.paragraphs || [])).flatMap(pp => pp.lines || []);
+  const others = linesOf(first);
+  for (const l of linesOf(zhData)) {
+    if (/[\u3400-\u9fff]/.test(l.text || '')) continue;
+    const o = others.find(m => !/[\u3400-\u9fff]/.test(m.text || '') && Math.min(m.bbox.x1, l.bbox.x1) - Math.max(m.bbox.x0, l.bbox.x0) > 0.6 * (l.bbox.x1 - l.bbox.x0)
+      && Math.min(m.bbox.y1, l.bbox.y1) - Math.max(m.bbox.y0, l.bbox.y0) > 0.5 * (l.bbox.y1 - l.bbox.y0));
+    if (o && (o.confidence ?? 0) > (l.confidence ?? 0)) Object.assign(l, { text: o.text, confidence: o.confidence, words: o.words });
+  }
 }
 async function runOcr(pages) {
   const langs = store.get('pdfstudio.ocrLang', OCR_LANGS[0][0]);
@@ -1544,7 +1718,17 @@ async function runOcr(pages) {
       const worker = await getOcrWorker(langs);
       const h = await hiresRender(p);
       ocrBusy.set(p.key, 'Reading text…'); renderEditLayer(p);
-      const { data } = await worker.recognize(h.canvas);
+      let { data } = await worker.recognize(h.canvas);
+      // Tesseract reads best in the first language listed. A mostly-Chinese page is read again with Chinese first
+      // (with English first, Chinese headings in bold or large print often come out as Latin letters).
+      const parts = langs.split('+'), zh = parts.find(l => /^chi_/.test(l));
+      const txt = String(data.text || ''), han = (txt.match(/[\u3400-\u9fff]/g) || []).length, lat = (txt.match(/[A-Za-z]/g) || []).length;
+      if (zh && parts[0] !== zh && han > 20 && han > 0.5 * lat) {
+        ocrBusy.set(p.key, 'Reading Chinese text…'); renderEditLayer(p);
+        const w2 = await getOcrWorker(zh);
+        const first = data; data = (await w2.recognize(h.canvas)).data;
+        mergeLatinLines(data, first);
+      }
       const blocks = blocksFromOcr(data, h.scale, p);
       const k = editKeyOf(p);
       state.ocrResults.set(k, blocks);
@@ -2123,6 +2307,6 @@ window.addEventListener('beforeunload', e => { if (state.dirty) { e.preventDefau
     const files = list.map(f => new File([f.data], f.name, { type: 'application/pdf' }));
     openFiles(files, false);
   });
-  window.__pdfstudio = { editInfo, state, openFiles, buildPdf, save, setTool, rotatePages, deletePages, setZoom, undo, redo, useSignature, addAnnot, pageByKey, ready: !!pdfjsLib };
+  window.__pdfstudio = { editInfo, state, openFiles, buildPdf, save, setTool, renderAnnots, rotatePages, deletePages, setZoom, undo, redo, useSignature, addAnnot, pageByKey, ready: !!pdfjsLib };
 })();
 })();
