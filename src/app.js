@@ -1459,9 +1459,49 @@ async function matchScannedFont(p, a, b, h, opts = {}) {
 /* Chinese scans: compare single characters. Each character the OCR found is cut out of the scan and compared
    with the same character drawn in every Chinese font on this PC: its shape, how wide/tall it is and how heavy
    its strokes are (a Song face has thin strokes with serifs, Hei is even and heavy, Kai is brush-like). */
+/* Finds each Chinese character of a scanned line: walks along the line one character width at a time and
+   puts each boundary in the nearest gap between characters, so small errors don't add up along the line. */
+function segmentLine(h, line, em, bgL) {
+  const s = h.scale, x0 = Math.max(0, Math.floor((line.left - 0.3 * em) * s)), x1 = Math.min(h.canvas.width, Math.ceil((line.right + 0.3 * em) * s));
+  const y0 = Math.max(0, Math.floor(line.top * s)), y1 = Math.min(h.canvas.height, Math.ceil(line.bottom * s));
+  const w = x1 - x0, hh = y1 - y0; if (w < 4 || hh < 4) return [];
+  const d = h.canvas.getContext('2d').getImageData(x0, y0, w, hh).data, col = new Float32Array(w), top = new Int32Array(w).fill(hh), bot = new Int32Array(w).fill(-1);
+  for (let y = 0; y < hh; y++) for (let x = 0; x < w; x++) {
+    const i = (y * w + x) * 4, v = clamp((bgL - (0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2])) / Math.max(40, bgL * 0.6), 0, 1);
+    col[x] += v; if (v > 0.4) { if (y < top[x]) top[x] = y; bot[x] = y; }
+  }
+  const thr = 0.04 * hh, E = em * s, out = [];
+  const nextInk = from => { for (let x = Math.max(0, Math.round(from)); x < w; x++) if (col[x] > thr) return x; return w; };
+  let cur = nextInk((line.left - 0.1 * em) * s - x0);
+  // pieces: one Chinese character, one full-width punctuation mark, or a run of Latin letters / digits
+  const toks = line.text.match(/[\u3400-\u9fff\uf900-\ufaff\u3005-\u3007]|[\u2e80-\u33ff\uff00-\uffef]|[^\s\u2e80-\u9fff\uf900-\ufaff\uff00-\uffef]+/g) || [];
+  const runEnd = from => { let x = from; while (x < w && col[x] > thr) x++; return x; };
+  for (const t of toks) {
+    if (cur >= w) break;
+    let best;
+    if (!HAN.test(t) && FULLW.test(t)) { // a punctuation mark is a small blob of ink
+      const e2 = runEnd(cur); let t0 = hh, b0 = -1; for (let x = cur; x < e2; x++) { t0 = Math.min(t0, top[x]); b0 = Math.max(b0, bot[x]); }
+      // a small mark (、，。) that was already passed: the ink here is a full-height character, leave it for the next piece
+      if (/[、，。．]/.test(t) && b0 - t0 > 0.55 * E) continue;
+      best = e2;
+    }
+    else {
+      const cw = emWidth(t) * E, pred = cur + cw - 0.08 * E; // the ink ends a little before the character's full width
+      best = Math.round(pred); let bestC = Infinity;
+      for (let x = Math.round(pred - 0.3 * Math.min(cw, E)); x <= Math.round(pred + 0.3 * Math.min(cw, E)); x++) {
+        if (x <= cur || x >= w) continue;
+        const c = col[x] + 0.02 * hh * Math.abs(x - pred) / E; if (c < bestC) { bestC = c; best = x; }
+      }
+    }
+    if (HAN.test(t) && best - cur > 0.5 * E) out.push({ ch: t, x0: (x0 + cur) / s, x1: (x0 + best) / s, y0: line.top, y1: line.bottom });
+    const nx = nextInk(best + 1);
+    cur = nx - best > 1.6 * E ? best + 1 : nx; // a big gap means we lost track: don't jump over text
+  }
+  return out;
+}
 const cjkMatchCache = new Map(); // page + text size -> result, so the next paragraph opens instantly
 async function matchCjkFont(p, a, b, h, opts, cands) {
-  const ck = `${p.key}|${Math.round(b.size)}|${opts.weight || ''}`;
+  const ck = `${p.key}|${b.id}|${opts.weight || ''}`;
   if (cjkMatchCache.has(ck)) {
     const c = await cjkMatchCache.get(ck);
     if (c) { if (opts.suggest) { showFontSuggestions(c.sugg); setFontInfo(a, { suggestions: c.sugg }); }
@@ -1473,19 +1513,22 @@ async function matchCjkFont(p, a, b, h, opts, cands) {
   catch (e) { done(null); cjkMatchCache.delete(ck); throw e; }
 }
 async function matchCjkFontNow(p, a, b, h, opts, cands) {
+  if (!cands.length) return null;
+  const s = h.scale, em = a.size;
+  const bgL = (() => { const c = parseInt(sampleColors(h, b).bg.slice(1), 16); return 0.299 * (c >> 16) + 0.587 * ((c >> 8) & 255) + 0.114 * (c & 255); })();
   const glyphs = [], seen = new Set();
-  const take = ls => { for (const l of ls) for (const g of l.glyphs || []) if (!seen.has(g.ch) && glyphs.length < 16) { seen.add(g.ch); glyphs.push(g); } };
-  take(b.lines || []);
+  const take = (ls, size) => { for (const l of ls) for (const g of segmentLine(h, l, size, bgL)) if (!seen.has(g.ch) && glyphs.length < 16) { seen.add(g.ch); glyphs.push(g); } };
+  take(b.lines || [], b.size);
+  if (window.__cjkDebug) console.log('[diag] cjk seg', b.lines[0].text, JSON.stringify(segmentLine(h, b.lines[0], b.size, bgL).map(g => g.ch + Math.round(g.x0) + '-' + Math.round(g.x1))), 'left', b.lines[0].left, 'em', b.size);
   // a short line (a list item, a heading) has few characters: borrow more from same-size text on the page (usually the same font)
   if (glyphs.length < 8) {
     const info = editInfo.get(editKeyOf(p));
-    for (const o of (info && info.blocks) || []) if (o !== b && o.kind === 'text' && o.cjk && Math.abs(o.size / b.size - 1) < 0.15) take(o.lines || []);
+    const near = ((info && info.blocks) || []).filter(o => o !== b && o.kind === 'text' && o.cjk && Math.abs(o.size / b.size - 1) < 0.1)
+      .sort((o1, o2) => Math.abs(o1.y - b.y) - Math.abs(o2.y - b.y)); // the nearest text first (a list's other items, not a heading)
+    for (const o of near) if (glyphs.length < 8) take(o.lines || [], o.size);
   }
-  if (!cands.length) return null;
   status('Matching the scanned Chinese font…');
-  const s = h.scale, em = a.size;
-  const bgL = (() => { const c = parseInt(sampleColors(h, b).bg.slice(1), 16); return 0.299 * (c >> 16) + 0.587 * ((c >> 8) & 255) + 0.114 * (c & 255); })();
-  const G = 20, cell = document.createElement('canvas'), cctx = cell.getContext('2d', { willReadFrequently: true });
+  const G = 24, cell = document.createElement('canvas'), cctx = cell.getContext('2d', { willReadFrequently: true });
   const targets = [];
   for (const g of glyphs) {
     // the character's own box (a little margin), not its neighbours
@@ -1495,35 +1538,47 @@ async function matchCjkFontNow(p, a, b, h, opts, cands) {
     if (w < 6 || hh < 6) continue;
     cell.width = w; cell.height = hh; cctx.drawImage(h.canvas, x, y, w, hh, 0, 0, w, hh);
     const ib = inkBox(cctx, w, hh, bgL, true); if (ib.x1 < 0) continue;
-    let ink = 0; for (let i = 0; i < ib.m.length; i++) ink += ib.m[i];
-    targets.push({ ch: g.ch, map: sampleBox(ib, G, G), aspect: (ib.x1 - ib.x0 + 1) / (ib.y1 - ib.y0 + 1), dens: ink / Math.pow(em * s, 2), fill: (ib.y1 - ib.y0 + 1) / (em * s) });
+    let ink = 0; for (let i = 0; i < ib.m.length; i++) if (ib.m[i] > 0.15) ink += ib.m[i]; // specks of scanner noise don't count
+    let gr = 0, dk = 0; for (let i = 0; i < ib.m.length; i++) { if (ib.m[i] > 0.15) { dk++; if (ib.m[i] < 0.75) gr++; } }
+    targets.push({ ch: g.ch, gray: dk ? gr / dk : 0, map: sampleBox(ib, G, G), aspect: (ib.x1 - ib.x0 + 1) / (ib.y1 - ib.y0 + 1), dens: ink / Math.pow(em * s, 2), fill: (ib.y1 - ib.y0 + 1) / (em * s) });
   }
   const text = (b.lines || []).map(l => l.text).join('');
   const weights = opts.weight ? [opts.weight] : [400, 700];
   const results = [], tried = new Set(), R = document.createElement('canvas'), rctx = R.getContext('2d', { willReadFrequently: true });
-  const px = 64; R.width = R.height = Math.round(px * 1.4);
+  // draw candidates at the scan's own size and sharpness, so their letter shapes are seen the way the scanner saw them
+  const px = clamp(Math.round(em * s), 20, 96); R.width = R.height = Math.round(px * 1.5);
+  const tGray = targets.length ? median(targets.map(t => t.gray)) : 0;
+  const draw = (rec, ch, blur) => {
+    rctx.filter = 'none'; rctx.fillStyle = '#fff'; rctx.fillRect(0, 0, R.width, R.height);
+    rctx.filter = blur ? `blur(${blur}px)` : 'none';
+    rctx.font = `${px}px ${rec.css}`; rctx.fillStyle = '#000'; rctx.textBaseline = 'alphabetic';
+    rctx.fillText(ch, Math.round(px * 0.25), Math.round(px * 1.15));
+    rctx.filter = 'none';
+    return inkBox(rctx, R.width, R.height, 255, true);
+  };
+  const grayOf = ib => { let gr = 0, dk = 0; for (let i = 0; i < ib.m.length; i++) if (ib.m[i] > 0.15) { dk++; if (ib.m[i] < 0.75) gr++; } return dk ? gr / dk : 0; };
   for (const fam of cands) for (const wt of weights) {
     const e = await PSF.faceOf(fam, wt, false);
     if (!e || Math.abs((e.weight || (e.bold ? 700 : 400)) - wt) > 100) continue;
     const ek = e.file + '#' + e.index; if (tried.has(ek)) continue; tried.add(ek);
     let rec; try { rec = await PSF.load(e); } catch { continue; }
-    if (!rec.f.covers(text.replace(/[^⺀-鿿豈-﫿　-〿＀-￯]/g, ''))) continue;
+    if (!rec.f.covers(text.replace(/[^\u2e80-\u9fff\uf900-\ufaff\u3000-\u303f\uff00-\uffef]/g, ''))) continue;
+    // how blurred the scan is: pick the blur that gives the same share of grey edge pixels
+    let blur = 0;
+    if (targets.length) { let bd = Infinity; for (const bl of [0, 0.5, 0.9, 1.4]) { const gs = targets.slice(0, 4).map(t => grayOf(draw(rec, t.ch, bl))); const dd = Math.abs(median(gs) - tGray); if (dd < bd) { bd = dd; blur = bl; } } }
     let sum = 0, n = 0; const dbg = [0, 0, 0, 0];
     for (const t of targets) {
-      rctx.fillStyle = '#fff'; rctx.fillRect(0, 0, R.width, R.height);
-      rctx.font = `${px}px ${rec.css}`; rctx.fillStyle = '#000'; rctx.textBaseline = 'alphabetic';
-      rctx.fillText(t.ch, Math.round(px * 0.2), Math.round(px * 1.1));
-      const ib = inkBox(rctx, R.width, R.height, 255, true); if (ib.x1 < 0) continue;
-      let ink = 0; for (let i = 0; i < ib.m.length; i++) ink += ib.m[i];
+      const ib = draw(rec, t.ch, blur); if (ib.x1 < 0) continue;
+      let ink = 0; for (let i = 0; i < ib.m.length; i++) if (ib.m[i] > 0.15) ink += ib.m[i];
       const dens = ink / (px * px), aspect = (ib.x1 - ib.x0 + 1) / (ib.y1 - ib.y0 + 1), fill = (ib.y1 - ib.y0 + 1) / px;
       const f1 = similarity(t.map, sampleBox(ib, G, G)), f2 = Math.abs(Math.log(t.aspect / aspect)), f3 = Math.log(t.dens / dens), f4 = Math.log(t.fill / fill);
-      sum += f1 - 0.8 * f2 - 0.6 * Math.abs(f3) - 0.5 * Math.abs(f4);
+      sum += f1 - 0.8 * f2 - 0.4 * Math.abs(f3) - 0.5 * Math.abs(f4);
       dbg[0] += f1; dbg[1] += f2; dbg[2] += f3; dbg[3] += f4;
       n++;
     }
     if (window.__cjkDebug) console.log('[diag] cjk', rec.family, rec.style, dbg.map(v => (v / n).toFixed(2)).join(' '));
     // CFF (PostScript-outline) Chinese fonts can't be cut down to the characters used, so they make big PDFs: prefer TrueType ones
-    if (n || !targets.length) results.push({ score: (n ? sum / n : 0) - (e.cff ? 0.06 : 0), rec });
+    if (n || !targets.length) results.push({ score: (n ? sum / n : 0) - (e.cff ? 0.06 : 0) + ((e.weight || 400) <= 500 ? 0.03 : 0), rec }); // regular weight is the usual one
   }
   status('Ready');
   results.sort((x, y) => y.score - x.score);
@@ -1637,29 +1692,41 @@ const FULLW = /[⺀-鿿豈-﫿＀-￯　-〿]/; // full-width: characters and CJ
 /* Chinese lines: Tesseract's row height counts ascender and descender room that Chinese characters don't have,
    so the size would come out ~40% too big. Chinese characters are all one em wide, so the character pitch along
    the line (and the height of the characters themselves) gives the real font size. */
+// Width of a text in em, in a typical Chinese font (Chinese characters are 1 em, Latin letters about half)
+const REF_CJK_FONT = '100px "Microsoft YaHei", "SimSun", "WenQuanYi Zen Hei", "Noto Sans CJK SC", sans-serif';
+function emWidth(t) { measureCtx.font = REF_CJK_FONT; return measureCtx.measureText(t).width / 100; }
 function cjkLineMetrics(l, scale, text) {
   const chars = [...text.replace(/\s+/g, '')];
-  const full = chars.filter(c => FULLW.test(c)).length, half = chars.length - full;
   if (chars.filter(c => HAN.test(c)).length < 2) return null;
+  const full = chars.filter(c => FULLW.test(c)).length;
   const bb = l.bbox, words = l.words || [];
-  const hs = [], bottoms = [];
+  let hs = [], bottoms = [];
   for (const w of words) {
     const t = String(w.text || '').trim(), b = w.bbox; if (!b || !t) continue;
     if ([...t].every(c => HAN.test(c))) { hs.push((b.y1 - b.y0) / scale); bottoms.push(b.y1 / scale); }
   }
+  // OCR sometimes gives a character a box two lines tall: ignore boxes far taller than the typical ones
+  if (hs.length >= 2) { const lo = median([...hs].sort((x, y) => x - y).slice(0, Math.ceil(hs.length / 2))); hs = hs.filter(h => h <= 1.3 * lo); }
   const width = (bb.x1 - bb.x0) / scale;
-  const pitch = width / Math.max(1, full + 0.55 * half - 0.08); // the line box starts and ends at ink, not at the character cell
+  // size from the width: the line is as wide as its characters (the box starts and ends at ink, not at the character cell)
+  const sizeW = width / Math.max(0.5, emWidth(text) - 0.08);
   const hSize = hs.length >= 2 ? median(hs) / 0.93 : (bb.y1 - bb.y0) / scale / 1.02;
-  // justified lines stretch the pitch; trust it only when it agrees with the character height
-  const size = full >= 4 && full >= 0.8 * chars.length && pitch > 0.8 * hSize && pitch < 1.15 * hSize ? Math.min(pitch, 1.08 * hSize) : hSize;
-  // Chinese characters sit about 0.1 em below the baseline that Latin letters stand on
-  const base = (bottoms.length >= 2 ? median(bottoms) : bb.y1 / scale) - 0.11 * size;
-  // Where each character is: Chinese characters follow one another at a fixed pitch from the start of the line
-  // (OCR's own per-character boxes are often off), up to the first half-width letter or digit.
-  const glyphs = [], p = full === chars.length ? pitch : size, left = bb.x0 / scale - 0.05 * p;
-  for (let i = 0; i < chars.length && FULLW.test(chars[i]); i++)
-    if (HAN.test(chars[i])) glyphs.push({ ch: chars[i], x0: left + i * p + 0.03 * p, x1: left + (i + 1) * p - 0.03 * p, y0: bb.y0 / scale, y1: bb.y1 / scale });
-  return { size, base, glyphs };
+  const agree = sizeW > 0.8 * hSize && sizeW < 1.2 * hSize;
+  // justified lines stretch the spacing a little; a line of only Chinese characters can't be narrower than its size
+  const size = agree ? (full === chars.length ? Math.min(sizeW, 1.08 * hSize) : sizeW) : sizeW;
+  return { size, sizeW, hSize, sure: agree, bottom: bottoms.length >= 2 ? median(bottoms) : bb.y1 / scale };
+}
+// Where each Chinese character of a line is, from the character widths (OCR's own per-character boxes are often off)
+function cjkGlyphs(line, size) {
+  const out = [], t = line.text;
+  // spread the characters over the line's real width (justified lines are a little wider than their characters)
+  const em = (line.right - line.left) / Math.max(0.5, emWidth(t) - 0.08), left = line.left - 0.05 * em;
+  let x = 0;
+  for (const ch of t) {
+    if (HAN.test(ch)) out.push({ ch, x0: left + x + 0.03 * em, x1: left + x + em - 0.03 * em, y0: line.top, y1: line.bottom });
+    x += emWidth(ch) * em;
+  }
+  return out;
 }
 function blocksFromOcr(data, scale, p) {
   const lines = [];
@@ -1672,21 +1739,30 @@ function blocksFromOcr(data, scale, p) {
       const bb = l.bbox, ra = l.rowAttributes || {};
       const cj = cjkLineMetrics(l, scale, text);
       // Latin text: Tesseract's row height (x-height + ascenders + descenders) is about 87% of the font size
-      let size = cj ? cj.size : (ra.row_height ? ra.row_height * 1.15 : (bb.y1 - bb.y0) * 0.9) / scale;
-      if (size < 3 || size > 200) continue;
+      const size = cj ? cj.size : (ra.row_height ? ra.row_height * 1.15 : (bb.y1 - bb.y0) * 0.9) / scale;
       const bl = l.baseline && l.baseline.has_baseline !== false ? l.baseline : null;
-      const base = cj ? cj.base : bl ? bl.y0 / scale + (bl.y1 - bl.y0) / scale * ((bb.x0 - bl.x0) / Math.max(1, bl.x1 - bl.x0)) : bb.y1 / scale - size * 0.2;
+      const base = bl ? bl.y0 / scale + (bl.y1 - bl.y0) / scale * ((bb.x0 - bl.x0) / Math.max(1, bl.x1 - bl.x0)) : bb.y1 / scale - size * 0.2;
       lines.push({ text, left: bb.x0 / scale, right: bb.x1 / scale, base, size, top: bb.y0 / scale, bottom: bb.y1 / scale, font: 'sans', bold: false, italic: false,
-        para: pi, cjk: !!cj, glyphs: cj ? cj.glyphs : null });
+        para: pi, cjk: !!cj, cj });
     }
   });
-  markCells(lines);
-  // keep Tesseract's own paragraphs, but split any that our layout rules see as separate (list items, indents, short lines)
-  const contentW = lines.length ? Math.max(...lines.map(l => l.right)) - Math.min(...lines.map(l => l.left)) : 0;
-  const out = [];
-  const groups = [...new Set(lines.map(l => l.para))];
-  for (const g of groups) out.push(...linesToBlocks(lines.filter(l => l.para === g).sort((a, b) => a.base - b.base), `o${g}_`, { contentW }));
-  return out.filter(b => b.x < W);
+  // Chinese lines whose width and character height disagree (an OCR slip): take the reading closer to the page's usual size
+  const sure = lines.filter(l => l.cj && l.cj.sure).map(l => l.size);
+  const M = sure.length ? median(sure) : 0;
+  for (const l of lines) {
+    if (l.cj) {
+      if (!l.cj.sure && M) l.size = Math.abs(Math.log(l.cj.sizeW / M)) <= Math.abs(Math.log(l.cj.hSize / M)) ? l.cj.sizeW : l.cj.hSize;
+      // Chinese characters sit about 0.1 em below the baseline that Latin letters stand on
+      l.base = l.cj.bottom - 0.11 * l.size;
+    }
+    delete l.cj;
+  }
+  const ok = lines.filter(l => l.size >= 3 && l.size <= 200).sort((a, b) => a.base - b.base);
+  markCells(ok);
+  // The whole page is grouped with our own rules (list items, indents, short lines, line spacing); Tesseract's paragraphs
+  // often cut a paragraph's last short line off into a paragraph of its own
+  const contentW = ok.length ? Math.max(...ok.map(l => l.right)) - Math.min(...ok.map(l => l.left)) : 0;
+  return linesToBlocks(ok, 'o', { contentW }).filter(b => b.x < W);
 }
 /* After a Chinese-only read, lines with no Chinese in them (English or Malay) are taken from the first,
    all-languages read when that one was more confident about them. */
